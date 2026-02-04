@@ -13,6 +13,13 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # ✅ Restaurar estado (último vídeo avisado)
+      - name: Restore state cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: yt-alerts-state
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -20,7 +27,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install feedparser python-telegram-bot==13.15
+          pip install feedparser requests python-telegram-bot==13.15
 
       - name: Run bot
         env:
@@ -29,3 +36,10 @@ jobs:
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
         run: |
           python main.py
+
+      # ✅ Guardar estado actualizado
+      - name: Save state cache
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: yt-alerts-state
