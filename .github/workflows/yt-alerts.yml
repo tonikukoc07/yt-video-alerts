@@ -13,7 +13,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # RESTORE: recupera el state.json más reciente si existe
+      # ✅ RESTORE: recupera el state.json más reciente si existe
       - name: Restore state cache
         uses: actions/cache/restore@v4
         with:
@@ -30,7 +30,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install feedparser requests python-telegram-bot==13.15
+          pip install requests python-telegram-bot==13.15
 
       - name: Run bot
         env:
@@ -40,7 +40,7 @@ jobs:
         run: |
           python main.py
 
-      # SAVE: guarda el state.json actualizado SIEMPRE
+      # ✅ SAVE: guarda el state.json actualizado SIEMPRE
       - name: Save state cache
         uses: actions/cache/save@v4
         with:
