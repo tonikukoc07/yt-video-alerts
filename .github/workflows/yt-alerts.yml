@@ -1,25 +1,26 @@
 name: YouTube → Telegram Alerts
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # cada 5 minutos (UTC)
   workflow_dispatch:
+  schedule:
+    - cron: "*/10 * * * *"   # cada 10 minutos
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install feedparser python-telegram-bot==13.15
 
       - name: Run bot
         env:
@@ -27,4 +28,4 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
         run: |
-          python bot.py
+          python main.py
