@@ -1,30 +1,17 @@
 import os
 import json
+import time
+import feedparser
 import requests
-import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
-
 from telegram import Bot
-from telegram.error import BadRequest
-
-STATE_FILE = "state.json"
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT_ID = os.environ.get("CHAT_ID", "")          # Canal: -100xxxxxxxxxx
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "")    # YouTube channel_id
-POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "120"))
+CHAT_ID = os.environ.get("CHAT_ID", "")
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "")
 
+POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "0"))  # en Actions no lo usamos (cron manda)
+STATE_FILE = "state.json"
 RSS_URL = f"https://www.youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}"
-
-# Namespaces del feed de YouTube
-NS = {
-    "atom": "http://www.w3.org/2005/Atom",
-    "yt": "http://www.youtube.com/xml/schemas/2015",
-    "media": "http://search.yahoo.com/mrss/",
-}
-
-MADRID_TZ = ZoneInfo("Europe/Madrid")
 
 
 def must_env(name, value):
@@ -47,136 +34,76 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def parse_iso_dt(s: str) -> datetime | None:
-    if not s:
+def safe_text(s: str) -> str:
+    # evita problemas raros con entidades; NO usamos parse_mode
+    return (s or "").replace("\u0000", "")
+
+
+def fetch_latest_entry():
+    feed = feedparser.parse(RSS_URL)
+    if not feed.entries:
         return None
-    # YouTube viene tipo: 2026-02-04T14:01:31+00:00
+
+    e = feed.entries[0]
+
+    # video id
+    vid = getattr(e, "yt_videoid", None) or getattr(e, "yt_videoId", None)
+
+    title = safe_text(getattr(e, "title", "") or "")
+    link = safe_text(getattr(e, "link", "") or "")
+
+    # thumbnail (normalmente viene en media_thumbnail)
+    thumb = None
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
+        if hasattr(e, "media_thumbnail") and e.media_thumbnail:
+            thumb = e.media_thumbnail[0].get("url")
     except Exception:
-        return None
+        thumb = None
 
+    # detectar live si el feed lo trae (a veces no aparece)
+    live_flag = None
+    try:
+        # algunos feeds lo traen como yt_livebroadcastcontent / ytc...
+        live_flag = getattr(e, "yt_livebroadcastcontent", None)
+    except Exception:
+        live_flag = None
 
-def fetch_latest_from_rss():
-    """
-    Devuelve dict con:
-      video_id, title, link, thumb, views, published_utc, live_status
-    live_status: "live" | "upcoming" | "none" | ""
-    """
-    r = requests.get(RSS_URL, timeout=20)
-    r.raise_for_status()
-
-    root = ET.fromstring(r.text)
-
-    entry = root.find("atom:entry", NS)
-    if entry is None:
-        return None
-
-    video_id = (entry.findtext("yt:videoId", default="", namespaces=NS) or "").strip()
-    title = (entry.findtext("atom:title", default="", namespaces=NS) or "").strip()
-    link_el = entry.find("atom:link[@rel='alternate']", NS)
-    link = (link_el.get("href") if link_el is not None else "").strip()
-
-    published = (entry.findtext("atom:published", default="", namespaces=NS) or "").strip()
-    published_utc = parse_iso_dt(published)
-
-    # liveBroadcastContent suele venir en directos / upcoming
-    live_status = (entry.findtext("yt:liveBroadcastContent", default="", namespaces=NS) or "").strip().lower()
-    # valores típicos: live / upcoming / none
-    if live_status not in ("live", "upcoming", "none"):
-        live_status = ""
-
-    # miniatura + vistas (media:group)
-    thumb = ""
-    views = ""
-    media_group = entry.find("media:group", NS)
-    if media_group is not None:
-        thumb_el = media_group.find("media:thumbnail", NS)
-        if thumb_el is not None:
-            thumb = (thumb_el.get("url") or "").strip()
-
-        stats_el = media_group.find("media:community/media:statistics", NS)
-        if stats_el is not None:
-            views = (stats_el.get("views") or "").strip()
+    is_live = (str(live_flag).lower() == "live")
 
     return {
-        "video_id": video_id,
+        "vid": vid,
         "title": title,
         "link": link,
         "thumb": thumb,
-        "views": views,
-        "published_utc": published_utc,
-        "live_status": live_status,
+        "is_live": is_live,
     }
 
 
-def format_message(data: dict):
-    # Hora España
-    published_local_str = ""
-    if data.get("published_utc"):
-        dt_local = data["published_utc"].astimezone(MADRID_TZ)
-        published_local_str = dt_local.strftime("%d/%m %H:%M")
+def send_to_telegram(bot: Bot, chat_id: int, item: dict):
+    title = item["title"]
+    link = item["link"]
+    thumb = item["thumb"]
+    is_live = item["is_live"]
 
-    is_live = (data.get("live_status") == "live")
     header = "🔴 DIRECTO" if is_live else "🎥 NUEVO VÍDEO"
+    caption = f"{header}\n✨ {title}\n👉 {link}"
 
-    # vistas (si vienen)
-    views = data.get("views")
-    views_line = f"👀 {views} views\n" if views else ""
-
-    # Mensaje final (sin parse_mode para evitar errores por caracteres raros)
-    msg = (
-        f"{header}\n"
-        f"✨ {data.get('title','')}\n"
-        f"{views_line}"
-        f"🕒 {published_local_str}\n"
-        f"👉 {data.get('link','')}"
-    ).strip()
-
-    return msg, is_live
-
-
-def safe_unpin(bot: Bot, chat_id: int, message_id: int | None):
-    if not message_id:
-        return
-    try:
-        bot.unpin_chat_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        # si ya no existe / no se puede, lo ignoramos
-        pass
-
-
-def safe_pin(bot: Bot, chat_id: int, message_id: int):
-    try:
-        bot.pin_chat_message(chat_id=chat_id, message_id=message_id, disable_notification=True)
-    except Exception:
-        # si falta permiso de fijar en el canal, no rompemos el bot
-        pass
-
-
-def send_post(bot: Bot, chat_id: int, msg: str, thumb_url: str):
-    """
-    Intenta enviar con foto (miniatura).
-    Si falla, fallback a texto.
-    Devuelve message_id del post (si se pudo).
-    """
-    try:
-        if thumb_url:
-            m = bot.send_photo(chat_id=chat_id, photo=thumb_url, caption=msg, parse_mode=None)
-            return m.message_id
-        else:
-            m = bot.send_message(chat_id=chat_id, text=msg, parse_mode=None)
-            return m.message_id
-    except BadRequest as e:
-        # fallback por si Telegram se queja de la foto/caption
+    # Intentar enviar con miniatura (queda “pro”)
+    if thumb:
         try:
-            m = bot.send_message(chat_id=chat_id, text=msg, parse_mode=None)
-            return m.message_id
-        except Exception:
-            raise e
+            # telegram necesita un “file-like” o URL descargada; descargamos rápido
+            r = requests.get(thumb, timeout=10)
+            r.raise_for_status()
+            bot.send_photo(chat_id=chat_id, photo=r.content, caption=caption)
+            return
+        except Exception as e:
+            print("send_photo failed, fallback to text. Error:", repr(e))
+
+    # fallback a texto
+    bot.send_message(chat_id=chat_id, text=caption, parse_mode=None)
 
 
-def main():
+def run_once():
     must_env("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
     must_env("CHAT_ID", CHAT_ID)
     must_env("CHANNEL_ID", CHANNEL_ID)
@@ -185,37 +112,43 @@ def main():
     chat_id = int(CHAT_ID)
 
     state = load_state()
-    last_video_id = state.get("last_video_id")
-    last_pinned_message_id = state.get("last_pinned_message_id")
+    last_vid = state.get("last_video_id")
+    print("Loaded last_video_id =", last_vid)
 
-    latest = fetch_latest_from_rss()
-    if not latest or not latest.get("video_id"):
+    latest = fetch_latest_entry()
+    if not latest:
         print("No entries in RSS.")
         return
 
-    vid = latest["video_id"]
+    vid = latest["vid"]
+    print("Latest vid =", vid, "title =", latest["title"])
 
-    # ✅ Evitar duplicados
-    if vid == last_video_id:
-        print("No new video. last_video_id =", last_video_id)
+    # 1) Si es el primer run SIN state, inicializa y NO avisa (para no spamear con lo antiguo)
+    if not last_vid:
+        state["last_video_id"] = vid
+        save_state(state)
+        print("Initialized state with last_video_id =", vid, "(no notification)")
         return
 
-    msg, is_live = format_message(latest)
+    # 2) Si cambió -> notifica
+    if vid and vid != last_vid:
+        send_to_telegram(bot, chat_id, latest)
+        state["last_video_id"] = vid
+        save_state(state)
+        print("Notified and updated state to", vid)
+    else:
+        print("No new video/directo. Skipping.")
 
-    # ✅ Publicar + miniatura
-    print("New item detected:", vid, "| live:", is_live)
-    message_id = send_post(bot, chat_id, msg, latest.get("thumb", ""))
 
-    # ✅ Pin automático del último aviso (desfija el anterior)
-    safe_unpin(bot, chat_id, last_pinned_message_id)
-    safe_pin(bot, chat_id, message_id)
+def main():
+    # En GitHub Actions: ejecutar una vez y salir
+    run_once()
 
-    # ✅ Guardar estado
-    state["last_video_id"] = vid
-    state["last_pinned_message_id"] = message_id
-    save_state(state)
-
-    print("Posted OK. message_id =", message_id)
+    # Si algún día lo ejecutas en Railway/servidor, puedes activar loop:
+    if POLL_SECONDS and POLL_SECONDS > 0:
+        while True:
+            time.sleep(POLL_SECONDS)
+            run_once()
 
 
 if __name__ == "__main__":
