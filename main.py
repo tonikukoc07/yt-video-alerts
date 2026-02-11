@@ -8,6 +8,7 @@ import feedparser
 import requests
 from telegram import Bot
 
+# ========= ENV =========
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "")
@@ -86,13 +87,13 @@ def is_live_now(video_url: str) -> bool:
         r.raise_for_status()
         html = r.text
 
-        # Señales fiables para "en vivo ahora"
+        # SOLO señales fiables
         if '"isLiveNow":true' in html:
             return True
         if '"status":"LIVE"' in html:
             return True
 
-        # Si está ended/offline, seguro que NO es live
+        # señales de NO live
         if '"status":"ENDED"' in html:
             return False
         if '"LIVE_STREAM_OFFLINE"' in html:
@@ -102,15 +103,17 @@ def is_live_now(video_url: str) -> bool:
 
         return False
     except Exception:
-        # Si falla la petición, mejor NO marcar live (evita falsos positivos)
+        # si falla, no marcamos live
         return False
 
 
 def build_caption(kind: str, item: dict) -> str:
     header = "🔴 DIRECTO" if kind == "live" else "🎥 NUEVO VÍDEO"
     lines = [header, f"✨ {item['title']}"]
+
     if isinstance(item.get("published_utc"), datetime):
         lines.append(f"🕒 {format_local_time(item['published_utc'])}")
+
     lines.append(f"👉 {item['link']}")
     return "\n".join(lines)
 
@@ -139,29 +142,29 @@ def parse_items(entries):
         vid = getattr(e, "yt_videoid", None) or getattr(e, "yt_videoId", None) or ""
         if not vid:
             continue
+        link = safe_text(getattr(e, "link", "") or "")
         items.append({
             "vid": vid,
             "title": safe_text(getattr(e, "title", "") or ""),
-            "link": safe_text(getattr(e, "link", "") or ""),
+            "link": link,
             "thumb": extract_thumb(e),
             "published_utc": parse_entry_datetime(e),
         })
+
     # más reciente primero
     def key_dt(x):
         dt = x.get("published_utc")
         return dt.timestamp() if isinstance(dt, datetime) else 0
+
     items.sort(key=key_dt, reverse=True)
     return items
 
 
 def choose_pin_target(items):
     # Prioridad B: si hay live activo -> ese; si no -> el más reciente
-    lives = []
     for it in items:
         if is_live_now(it["link"]):
-            lives.append(it)
-    if lives:
-        return "live", lives[0]
+            return "live", it
     return "video", items[0]
 
 
@@ -174,9 +177,15 @@ def run_once():
     chat_id = int(CHAT_ID)
 
     state = load_state()
-    last_notified_vid = state.get("last_notified_vid")  # para avisos
-    last_pinned_vid = state.get("last_pinned_vid")      # para pin
-    last_pinned_kind = state.get("last_pinned_kind")    # "live"/"video"
+
+    # Estados para NOTIFY
+    last_notified_vid = state.get("last_notified_vid")
+    last_notified_kind = state.get("last_notified_kind")
+
+    # Estados para PIN
+    last_pinned_vid = state.get("last_pinned_vid")
+    last_pinned_kind = state.get("last_pinned_kind")
+    last_pinned_message_id = state.get("last_pinned_message_id")
 
     feed = feedparser.parse(RSS_URL)
     entries = feed.entries[:SCAN_LIMIT] if getattr(feed, "entries", None) else []
@@ -186,39 +195,64 @@ def run_once():
         print("No items.")
         return
 
-    # --- Notificación (nuevo contenido según el primero del feed) ---
+    # --- NOTIFICACIÓN (si cambia vid o cambia estado con mismo vid) ---
     latest = items[0]
     latest_kind = "live" if is_live_now(latest["link"]) else "video"
 
+    print("Latest:", latest["vid"], "kind:", latest_kind, "title:", latest["title"])
+    print("State notify:", last_notified_vid, last_notified_kind)
+
     if not last_notified_vid:
+        # primer run: inicializa sin avisar (evita spam)
         state["last_notified_vid"] = latest["vid"]
+        state["last_notified_kind"] = latest_kind
         save_state(state)
         print("Initialized (no notify).")
     else:
-        if latest["vid"] != last_notified_vid:
-            send_post(bot, chat_id, latest_kind, latest)
-            state["last_notified_vid"] = latest["vid"]
-            save_state(state)
-            print("Notified:", latest["vid"])
+        notify_needed = (latest["vid"] != last_notified_vid) or (
+            latest["vid"] == last_notified_vid and latest_kind != last_notified_kind
+        )
 
-    # --- Pin (Prioridad B) ---
+        if notify_needed:
+            msg_id = send_post(bot, chat_id, latest_kind, latest)
+            state["last_notified_vid"] = latest["vid"]
+            state["last_notified_kind"] = latest_kind
+            print("Notified msg_id:", msg_id)
+            # Guardamos el id del mensaje si lo pinneamos luego
+            last_sent_message_id = msg_id
+        else:
+            print("No new item to notify.")
+            last_sent_message_id = None
+
+    # --- PIN (Prioridad B) ---
     if PIN_LATEST:
         pin_kind, pin_item = choose_pin_target(items)
         pin_vid = pin_item["vid"]
 
-        # ✅ Si cambió el vídeo fijado, o si es el MISMO vídeo pero cambió live->video (o al revés),
-        # reposteamos y fijamos para que el icono cambie.
-        needs_repin = (pin_vid != last_pinned_vid) or (pin_kind != last_pinned_kind)
+        print("Pin candidate:", pin_vid, pin_kind)
+        print("State pin:", last_pinned_vid, last_pinned_kind, last_pinned_message_id)
 
-        if needs_repin:
-            msg_id = send_post(bot, chat_id, pin_kind, pin_item)
-            pin_message(bot, chat_id, msg_id)
+        # Si cambia el objetivo del pin (o cambia kind), repin
+        pin_needed = (pin_vid != last_pinned_vid) or (pin_kind != last_pinned_kind)
+
+        if pin_needed:
+            # ✅ Importante: si JUSTO hemos publicado ese mismo item en NOTIFY,
+            # reutilizamos ese message_id para fijar y NO repostear.
+            if last_sent_message_id and pin_vid == state.get("last_notified_vid") and pin_kind == state.get("last_notified_kind"):
+                msg_id_to_pin = last_sent_message_id
+            else:
+                msg_id_to_pin = send_post(bot, chat_id, pin_kind, pin_item)
+
+            pin_message(bot, chat_id, msg_id_to_pin)
+
             state["last_pinned_vid"] = pin_vid
             state["last_pinned_kind"] = pin_kind
-            save_state(state)
-            print("Pinned:", pin_vid, "kind:", pin_kind, "msg:", msg_id)
+            state["last_pinned_message_id"] = msg_id_to_pin
+            print("Pinned msg_id:", msg_id_to_pin)
         else:
             print("Pin unchanged.")
+
+    save_state(state)
 
 
 if __name__ == "__main__":
