@@ -34,5 +34,6 @@ jobs:
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           TZ: "Europe/Madrid"
           SCAN_LIMIT: "15"
+          KEEP_LAST: "10"
         run: |
           python main.py
