@@ -12,9 +12,10 @@ CHANNEL_ID = os.environ.get("CHANNEL_ID", "")
 
 TZ_NAME = os.environ.get("TZ", "Europe/Madrid")
 SCAN_LIMIT = int(os.environ.get("SCAN_LIMIT", "15"))
-KEEP_LAST = int(os.environ.get("KEEP_LAST", "10"))
+
 
 RSS_URL = f"https://www.youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}"
+LIVE_URL = f"https://www.youtube.com/channel/{CHANNEL_ID}/live"
 
 
 def must_env(name, value):
@@ -32,36 +33,7 @@ def format_local(dt: datetime | None) -> str:
     return dt.astimezone(ZoneInfo(TZ_NAME)).strftime("%d/%m %H:%M")
 
 
-def download_bytes(url: str, timeout=12) -> bytes | None:
-    try:
-        r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        return r.content
-    except Exception:
-        return None
-
-
-def is_live_now_by_watch(video_id: str) -> bool:
-    """
-    ✅ Directo real: SOLO True si 'isLiveNow:true' o status LIVE en el HTML del watch.
-    """
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    try:
-        r = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        html = r.text
-
-        if '"isLiveNow":true' in html:
-            return True
-        if '"status":"LIVE"' in html:
-            return True
-
-        return False
-    except Exception:
-        return False
-
-
-def extract_video_id_from_text(text: str) -> str | None:
+def extract_video_id(text: str) -> str | None:
     if not text:
         return None
     m = re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{6,})", text)
@@ -69,16 +41,55 @@ def extract_video_id_from_text(text: str) -> str | None:
 
 
 def get_pinned_video_id(bot: Bot, chat_id: int) -> str | None:
+    """Saca el videoId del mensaje fijado actual (si existe)."""
     try:
         chat = bot.get_chat(chat_id)
         pinned = getattr(chat, "pinned_message", None)
         if not pinned:
             return None
         if getattr(pinned, "caption", None):
-            return extract_video_id_from_text(pinned.caption)
+            return extract_video_id(pinned.caption)
         if getattr(pinned, "text", None):
-            return extract_video_id_from_text(pinned.text)
+            return extract_video_id(pinned.text)
         return None
+    except Exception:
+        return None
+
+
+def download_bytes(url: str, timeout=12) -> bytes | None:
+    try:
+        r = requests.get(
+            url,
+            timeout=timeout,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+            },
+        )
+        r.raise_for_status()
+        return r.content
+    except Exception:
+        return None
+
+
+def get_live_video_id_by_redirect() -> str | None:
+    """
+    ✅ Si hay DIRECTO público activo, /live suele terminar en ...watch?v=XXXX
+    ✅ Si no, se queda en /channel/...
+    """
+    try:
+        r = requests.get(
+            LIVE_URL,
+            timeout=12,
+            allow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+            },
+        )
+        final_url = r.url or ""
+        vid = extract_video_id(final_url)
+        return vid
     except Exception:
         return None
 
@@ -102,6 +113,7 @@ def parse_entry(e):
     try:
         if getattr(e, "published_parsed", None):
             import time as _time
+
             published_dt = datetime.fromtimestamp(_time.mktime(e.published_parsed), tz=ZoneInfo("UTC"))
     except Exception:
         published_dt = None
@@ -118,14 +130,14 @@ def parse_entry(e):
         "title": title,
         "link": link,
         "thumb": thumb,
-        "published_utc": published_dt
+        "published_utc": published_dt,
     }
 
 
 def build_caption(kind: str, item: dict) -> str:
     header = "🔴 DIRECTO" if kind == "live" else "🎥 NUEVO VÍDEO"
-    lines = [header, f"✨ {item['title']}"]
     when = format_local(item.get("published_utc"))
+    lines = [header, f"✨ {item['title']}"]
     if when:
         lines.append(f"🕒 {when}")
     lines.append(f"👉 https://www.youtube.com/watch?v={item['vid']}")
@@ -155,36 +167,50 @@ def main():
     bot = Bot(token=TELEGRAM_TOKEN)
     chat_id = int(CHAT_ID)
 
+    # 1) Detectar directo público activo (si existe)
+    live_vid = get_live_video_id_by_redirect()
+    print("live_vid_by_redirect =", live_vid)
+
+    # 2) Leer RSS para obtener info (título/miniatura) de live o del último vídeo
     entries = fetch_entries(SCAN_LIMIT)
-    items = []
-    for e in entries:
-        it = parse_entry(e)
-        if it:
-            items.append(it)
+    items = [parse_entry(e) for e in entries]
+    items = [it for it in items if it]
 
     if not items:
         print("No RSS entries.")
         return
 
-    # ✅ Prioridad B:
-    # - Si alguno de los top items está EN DIRECTO AHORA -> ese
-    # - Si no -> el más reciente (items[0])
-    live_item = None
-    for it in items:
-        if is_live_now_by_watch(it["vid"]):
-            live_item = it
-            break
+    # 3) Elegir objetivo PRIORIDAD B
+    target_kind = "video"
+    target_item = items[0]
 
-    if live_item:
-        target_kind, target_item = "live", live_item
-    else:
-        target_kind, target_item = "video", items[0]
+    if live_vid:
+        # Si el directo aparece dentro de los últimos N del RSS, cogemos su metadata
+        for it in items:
+            if it["vid"] == live_vid:
+                target_kind = "live"
+                target_item = it
+                break
+        else:
+            # Si no está en RSS (a veces pasa), usamos el live_vid con fallback mínimo
+            target_kind = "live"
+            target_item = {
+                "vid": live_vid,
+                "title": "Directo en YouTube",
+                "link": f"https://www.youtube.com/watch?v={live_vid}",
+                "thumb": None,
+                "published_utc": None,
+            }
 
+    # 4) Evitar duplicados: si ya está fijado ese mismo vídeo, no hacemos nada
     pinned_vid = get_pinned_video_id(bot, chat_id)
+    print("pinned_vid =", pinned_vid, "target_vid =", target_item["vid"])
+
     if pinned_vid == target_item["vid"]:
         print("Pinned already points to target. No action.")
         return
 
+    # 5) Publicar + fijar
     msg = send_post(bot, chat_id, target_kind, target_item)
     pin_message(bot, chat_id, msg.message_id)
     print("Posted + pinned:", target_kind, target_item["vid"])
