@@ -39,7 +39,7 @@ jobs:
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           SCAN_LIMIT: "15"
           TZ: "Europe/Madrid"
-          PIN_LATEST: "0"
+          PIN_LATEST: "1"
         run: |
           python main.py
 
