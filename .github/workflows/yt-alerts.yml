@@ -43,8 +43,9 @@ jobs:
         run: |
           python main.py
 
-      # 💾 Guardar state.json actualizado
+      # 💾 Guardar state.json actualizado SIEMPRE (aunque falle algo)
       - name: Save state cache
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: state.json
