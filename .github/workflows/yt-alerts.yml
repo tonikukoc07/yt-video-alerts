@@ -5,6 +5,11 @@ on:
   schedule:
     - cron: "*/5 * * * *"   # cada 5 minutos (UTC)
 
+# ✅ Evita solapes: si lanzas manual 2 veces, cancela el run anterior
+concurrency:
+  group: yt-telegram-alerts
+  cancel-in-progress: true
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -13,7 +18,6 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # ♻️ Restaurar state.json para evitar duplicados
       - name: Restore state cache
         uses: actions/cache/restore@v4
         with:
@@ -43,7 +47,6 @@ jobs:
         run: |
           python main.py
 
-      # 💾 Guardar state.json actualizado SIEMPRE (aunque falle algo)
       - name: Save state cache
         if: always()
         uses: actions/cache/save@v4
