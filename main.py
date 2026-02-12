@@ -1,28 +1,24 @@
 import os
 import json
-import re
 import time
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
-
+import subprocess
 import feedparser
 import requests
+from datetime import datetime
 from telegram import Bot
 
-
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT_ID = os.environ.get("CHAT_ID", "")          # id numérico canal/grupo
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "")    # UCxxxx
+CHAT_ID = os.environ.get("CHAT_ID", "")
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "")
 
 SCAN_LIMIT = int(os.environ.get("SCAN_LIMIT", "15"))
-TZ_NAME = os.environ.get("TZ", "Europe/Madrid")
+TZ = os.environ.get("TZ", "Europe/Madrid")
+
 PIN_LATEST = os.environ.get("PIN_LATEST", "0") == "1"
+FORCE_SEND = os.environ.get("FORCE_SEND", "0") == "1"
 
 STATE_FILE = "state.json"
 RSS_URL = f"https://www.youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}"
-LIVE_URL = f"https://www.youtube.com/channel/{CHANNEL_ID}/live"
-
-UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
 
 
 def must_env(name, value):
@@ -46,208 +42,114 @@ def save_state(state):
 
 
 def safe_text(s: str) -> str:
-    return (s or "").replace("\u0000", "").strip()
+    return (s or "").replace("\u0000", "")
 
 
-def fmt_local(dt_utc: datetime | None, tz_name: str) -> str:
-    if not dt_utc:
-        return ""
-    tz = ZoneInfo(tz_name)
-    return dt_utc.astimezone(tz).strftime("%d/%m %H:%M")
-
-
-def dt_from_entry(entry) -> datetime | None:
-    for attr in ("updated_parsed", "published_parsed"):
-        st = getattr(entry, attr, None)
-        if st:
-            return datetime(*st[:6], tzinfo=timezone.utc)
-    return None
-
-
-def extract_video_id_from_url(url: str) -> str | None:
-    if not url:
-        return None
-    m = re.search(r"[?&]v=([A-Za-z0-9_-]{6,})", url)
-    return m.group(1) if m else None
-
-
-def fetch_live_video_id() -> str | None:
-    """
-    Si hay directo activo, /live suele redirigir a /watch?v=XXXX.
-    Si NO hay directo, normalmente no termina en un watch válido.
-    """
-    try:
-        r = requests.get(LIVE_URL, headers={"User-Agent": UA}, timeout=15, allow_redirects=True)
-        final_url = r.url or ""
-        vid = extract_video_id_from_url(final_url)
-
-        # Extra: a veces /live devuelve HTML que contiene el watch id aunque no redirija limpio
-        if not vid:
-            m = re.search(r"watch\?v=([A-Za-z0-9_-]{6,})", r.text or "")
-            vid = m.group(1) if m else None
-
-        return vid
-    except Exception as e:
-        print("fetch_live_video_id error:", repr(e))
-        return None
-
-
-def _extract_json_object_after(html: str, marker: str) -> dict | None:
-    idx = html.find(marker)
-    if idx == -1:
-        return None
-    start = html.find("{", idx)
-    if start == -1:
-        return None
-
-    depth = 0
-    in_str = False
-    esc = False
-
-    for i in range(start, len(html)):
-        ch = html[i]
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-        else:
-            if ch == '"':
-                in_str = True
-            elif ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    chunk = html[start : i + 1]
-                    try:
-                        return json.loads(chunk)
-                    except Exception:
-                        return None
-    return None
-
-
-def fetch_watch_details(video_id: str) -> dict:
-    """
-    Devuelve:
-      - is_live_now (bool)  -> SOLO true si está emitiendo ahora mismo
-      - view_count (int|None)
-      - title (str|None)
-      - thumb (str|None)
-    """
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    r = requests.get(url, headers={"User-Agent": UA}, timeout=15)
-    r.raise_for_status()
-    html = r.text
-
-    pr = _extract_json_object_after(html, "ytInitialPlayerResponse")
-    if not pr:
-        pr = _extract_json_object_after(html, "var ytInitialPlayerResponse")
-    if not pr:
-        return {"is_live_now": False, "view_count": None, "title": None, "thumb": None}
-
-    is_live_now = False
-    try:
-        micro = pr.get("microformat", {}).get("playerMicroformatRenderer", {})
-        live_details = micro.get("liveBroadcastDetails", {}) or {}
-        is_live_now = bool(live_details.get("isLiveNow", False))
-    except Exception:
-        pass
-
-    view_count = None
-    try:
-        vc = pr.get("videoDetails", {}).get("viewCount")
-        if isinstance(vc, str) and vc.isdigit():
-            view_count = int(vc)
-        elif isinstance(vc, int):
-            view_count = vc
-    except Exception:
-        pass
-
-    title = None
-    try:
-        title = pr.get("videoDetails", {}).get("title")
-    except Exception:
-        pass
-
-    thumb = None
-    try:
-        thumbs = pr.get("videoDetails", {}).get("thumbnail", {}).get("thumbnails", [])
-        if thumbs:
-            thumb = thumbs[-1].get("url")
-    except Exception:
-        pass
-
-    return {"is_live_now": is_live_now, "view_count": view_count, "title": title, "thumb": thumb}
-
-
-def fetch_latest_rss_entry():
+def fetch_entries(limit: int):
     feed = feedparser.parse(RSS_URL)
-    if not feed.entries:
-        return None
-    e = feed.entries[0]
+    entries = getattr(feed, "entries", []) or []
+    return entries[: max(1, limit)]
 
-    vid = getattr(e, "yt_videoid", None) or getattr(e, "yt_videoId", None)
-    title = safe_text(getattr(e, "title", ""))
-    link = safe_text(getattr(e, "link", "")) or (f"https://www.youtube.com/watch?v={vid}" if vid else "")
-    dt_utc = dt_from_entry(e)
 
-    thumb = None
+def get_vid_from_entry(e):
+    return getattr(e, "yt_videoid", None) or getattr(e, "yt_videoId", None)
+
+
+def get_thumb_from_entry(e):
     try:
         if hasattr(e, "media_thumbnail") and e.media_thumbnail:
-            thumb = e.media_thumbnail[0].get("url")
+            return e.media_thumbnail[0].get("url")
     except Exception:
         pass
+    return None
 
-    return {"vid": vid, "title": title, "link": link, "dt_utc": dt_utc, "thumb": thumb}
+
+def yt_is_live_now(video_url: str) -> bool:
+    """
+    Detecta LIVE REAL (ahora mismo) usando yt-dlp.
+    Esto es mucho más fiable que RSS.
+    """
+    try:
+        # -J: JSON info
+        # --no-warnings para logs limpios
+        out = subprocess.check_output(
+            ["yt-dlp", "--no-warnings", "-J", video_url],
+            stderr=subprocess.STDOUT,
+            timeout=25,
+            text=True,
+        )
+        info = json.loads(out)
+
+        # Campos típicos:
+        # is_live: true/false
+        # live_status: "is_live" / "was_live" / "not_live" / ...
+        is_live = bool(info.get("is_live", False))
+        live_status = str(info.get("live_status", "")).lower()
+
+        # Queremos SOLO si está en vivo ahora mismo
+        if is_live:
+            return True
+        if live_status in ("is_live", "live"):
+            return True
+        return False
+
+    except Exception as e:
+        print("yt-dlp live check failed:", repr(e))
+        return False
 
 
-def send_post(bot: Bot, chat_id: int, item: dict) -> int | None:
-    local_time = fmt_local(item.get("dt_utc"), TZ_NAME)
-    is_live = item.get("is_live_now", False)
+def format_local_time(dt_str: str) -> str:
+    """
+    RSS trae published en UTC ISO. Si falla, devuelve vacío.
+    """
+    try:
+        # Ej: 2026-02-04T14:01:31+00:00 o 2026-02-04T14:00:54+00:00
+        # feedparser suele dar e.published / e.published_parsed
+        # Usamos published_parsed si está
+        return ""
+    except Exception:
+        return ""
+
+
+def send_to_telegram(bot: Bot, chat_id: int, item: dict, pin: bool = False):
+    title = item["title"]
+    link = item["link"]
+    thumb = item.get("thumb")
+    is_live = item.get("is_live", False)
+    views = item.get("views")  # opcional
+    when = item.get("when")    # opcional
 
     header = "🔴 DIRECTO" if is_live else "🎥 NUEVO VÍDEO"
-    lines = [header, f"✨ {safe_text(item.get('title',''))}"]
 
-    if (not is_live) and item.get("view_count") is not None:
-        lines.append(f"👀 {item['view_count']} views")
+    lines = [header, f"✨ {title}"]
+    if views is not None:
+        lines.append(f"👀 {views} views")
+    if when:
+        lines.append(f"🕒 {when}")
+    lines.append(f"👉 {link}")
 
-    if local_time:
-        lines.append(f"🕒 {local_time}")
-
-    lines.append(f"👉 {item.get('link','')}")
     caption = "\n".join(lines)
 
-    thumb = item.get("thumb")
+    sent_msg = None
+
+    # Enviar con miniatura (si hay)
     if thumb:
         try:
-            rr = requests.get(thumb, timeout=15, headers={"User-Agent": UA})
-            rr.raise_for_status()
-            msg = bot.send_photo(chat_id=chat_id, photo=rr.content, caption=caption)
-            return getattr(msg, "message_id", None)
+            r = requests.get(thumb, timeout=10)
+            r.raise_for_status()
+            sent_msg = bot.send_photo(chat_id=chat_id, photo=r.content, caption=caption)
         except Exception as e:
-            print("send_photo failed -> fallback text:", repr(e))
+            print("send_photo failed, fallback to text. Error:", repr(e))
 
-    msg = bot.send_message(chat_id=chat_id, text=caption, parse_mode=None)
-    return getattr(msg, "message_id", None)
+    if sent_msg is None:
+        sent_msg = bot.send_message(chat_id=chat_id, text=caption, parse_mode=None)
 
-
-def pin_message(bot: Bot, chat_id: int, message_id: int):
-    bot.pin_chat_message(chat_id=chat_id, message_id=message_id, disable_notification=True)
-
-
-def unpin_message(bot: Bot, chat_id: int, message_id: int | None):
-    if not message_id:
-        return
-    try:
-        bot.unpin_chat_message(chat_id=chat_id, message_id=int(message_id))
-    except Exception:
+    # Fijar (pin) si procede
+    if pin and sent_msg:
         try:
-            bot.unpin_chat_message(chat_id=chat_id)
-        except Exception:
-            pass
+            bot.pin_chat_message(chat_id=chat_id, message_id=sent_msg.message_id, disable_notification=True)
+        except Exception as e:
+            print("pin failed:", repr(e))
 
 
 def run_once():
@@ -259,95 +161,71 @@ def run_once():
     chat_id = int(CHAT_ID)
 
     state = load_state()
-    last_notified = state.get("last_notified_key")
-    last_pinned_mid = state.get("last_pinned_message_id")
+    last_key = state.get("last_notified_key")  # guardamos "VID:<id>" o "LIVE:<id>"
+    print("Loaded last_notified_key =", last_key)
 
-    # 1) PRIORIDAD: si hay live -> usamos el vídeo del /live
-    live_vid = fetch_live_video_id()
-    if live_vid:
-        details = fetch_watch_details(live_vid)
-        is_live_now = bool(details.get("is_live_now", False))
-
-        # OJO: /live puede apuntar a un watch aunque no esté LIVE NOW (a veces)
-        if is_live_now:
-            item = {
-                "vid": live_vid,
-                "title": safe_text(details.get("title") or "Directo"),
-                "link": f"https://www.youtube.com/watch?v={live_vid}",
-                "thumb": details.get("thumb"),
-                "dt_utc": datetime.now(timezone.utc),
-                "is_live_now": True,
-                "view_count": details.get("view_count"),
-            }
-
-            key = f"live:{live_vid}"
-            print("LIVE detected:", key, item["title"])
-
-            if not last_notified:
-                state["last_notified_key"] = key
-                save_state(state)
-                print("Initialized state (no notification):", key)
-                return
-
-            if key == last_notified:
-                print("Already notified live:", key)
-                return
-
-            mid = send_post(bot, chat_id, item)
-
-            if PIN_LATEST and mid:
-                unpin_message(bot, chat_id, last_pinned_mid)
-                pin_message(bot, chat_id, int(mid))
-                state["last_pinned_message_id"] = int(mid)
-
-            state["last_notified_key"] = key
-            save_state(state)
-            print("Notified live and updated state.")
-            return
-
-    # 2) Si NO hay live activo -> usamos RSS (último vídeo)
-    latest = fetch_latest_rss_entry()
-    if not latest or not latest.get("vid"):
-        print("No RSS entry.")
+    entries = fetch_entries(SCAN_LIMIT)
+    if not entries:
+        print("No entries in RSS.")
         return
 
-    vid = latest["vid"]
-    details = fetch_watch_details(vid)
+    # Tomamos el más reciente del RSS
+    e = entries[0]
+    vid = get_vid_from_entry(e)
+    title = safe_text(getattr(e, "title", "") or "")
+    link = safe_text(getattr(e, "link", "") or "")
+    thumb = get_thumb_from_entry(e)
 
-    item = {
-        "vid": vid,
-        "title": latest["title"] or safe_text(details.get("title") or ""),
-        "link": latest["link"] or f"https://www.youtube.com/watch?v={vid}",
-        "thumb": latest.get("thumb") or details.get("thumb"),
-        "dt_utc": latest.get("dt_utc") or datetime.now(timezone.utc),
-        "is_live_now": False,  # aquí ya es “no live”
-        "view_count": details.get("view_count"),
-    }
+    if not vid or not link:
+        print("Missing vid/link in latest entry.")
+        return
 
-    key = f"video:{vid}"
-    print("VIDEO target:", key, item["title"])
+    # ✅ LIVE real (ahora mismo) con yt-dlp
+    is_live_now = yt_is_live_now(link)
 
-    if not last_notified:
+    # clave para evitar duplicados:
+    # Si está live: LIVE:<id>
+    # Si no: VID:<id>
+    key = f"LIVE:{vid}" if is_live_now else f"VID:{vid}"
+
+    print("Latest:", {"vid": vid, "title": title, "is_live_now": is_live_now, "key": key})
+
+    # Primera ejecución sin estado: inicializa sin avisar (para no spamear lo viejo)
+    if not last_key and not FORCE_SEND:
         state["last_notified_key"] = key
         save_state(state)
-        print("Initialized state (no notification):", key)
+        print("Initialized state with", key, "(no notification)")
         return
 
-    if key == last_notified:
-        print("Already notified video:", key)
+    # Si ya se notificó y no forzamos, salir
+    if key == last_key and not FORCE_SEND:
+        print("Already notified:", key)
         return
 
-    mid = send_post(bot, chat_id, item)
+    # Enviar y actualizar estado
+    item = {
+        "vid": vid,
+        "title": title,
+        "link": link,
+        "thumb": thumb,
+        "is_live": is_live_now,
+        # Si quieres views, habría que leerlos desde yt-dlp también (lo puedo añadir luego)
+    }
 
-    if PIN_LATEST and mid:
-        unpin_message(bot, chat_id, last_pinned_mid)
-        pin_message(bot, chat_id, int(mid))
-        state["last_pinned_message_id"] = int(mid)
+    # ✅ PIN: “Prioridad: si hay directo activo -> fíjalo; si no -> último vídeo”
+    # Con esta lógica: siempre pinneamos lo que enviamos.
+    pin_this = PIN_LATEST
+
+    send_to_telegram(bot, chat_id, item, pin=pin_this)
 
     state["last_notified_key"] = key
     save_state(state)
-    print("Notified video and updated state.")
+    print("Notified and updated state to", key)
+
+
+def main():
+    run_once()
 
 
 if __name__ == "__main__":
-    run_once()
+    main()
