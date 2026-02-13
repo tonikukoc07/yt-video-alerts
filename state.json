@@ -1,1 +1,14 @@
-{}
+{
+  "notified": {
+    "video:mhf3iEC0aDs": 1771022991
+  },
+  "msg_ids": {
+    "video:mhf3iEC0aDs": 97
+  },
+  "pinned": {
+    "message_id": 97,
+    "kind": "video",
+    "vid": "mhf3iEC0aDs"
+  },
+  "last_seen_epoch": 1771022991
+}
