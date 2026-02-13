@@ -3,11 +3,12 @@ name: YouTube → Telegram Alerts (PRO)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *"   # cada 5 minutos (UTC). OJO: GitHub puede retrasar a veces.
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -39,6 +40,7 @@ jobs:
           SCAN_LIMIT: "25"
           PIN_LATEST: "1"
           DELETE_LIVE_WHEN_FINALIZED: "1"
+          # BASELINE_ONLY: "1"   # úsalo SOLO una vez si quieres reiniciar sin spamear
         run: |
           python main.py
 
