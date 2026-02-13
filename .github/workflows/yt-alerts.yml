@@ -40,7 +40,7 @@ jobs:
           SCAN_LIMIT: "25"
           PIN_LATEST: "1"
           DELETE_LIVE_WHEN_FINALIZED: "1"
-          # BASELINE_ONLY: "1"   # úsalo SOLO una vez si quieres reiniciar sin spamear
+          BASELINE_ONLY: "1"   # úsalo SOLO una vez si quieres reiniciar sin spamear
         run: |
           python main.py
 
