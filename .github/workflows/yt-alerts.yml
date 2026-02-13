@@ -39,12 +39,12 @@ jobs:
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           YT_API_KEY: ${{ secrets.YT_API_KEY }}
           SCAN_LIMIT: "25"
-          TZ: "Europe/Madrid"
           PIN_LATEST: "1"
+          DELETE_LIVE_WHEN_FINALIZED: "1"
         run: |
           python main.py
 
-      # 💾 Guardar state.json actualizado
+      # 💾 Guardar state.json siempre
       - name: Save state cache
         uses: actions/cache/save@v4
         with:
