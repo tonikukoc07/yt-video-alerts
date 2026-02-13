@@ -1,239 +1,242 @@
 import os
 import json
 import time
-import datetime
-import feedparser
 import requests
+from datetime import datetime
 from telegram import Bot
+from telegram.error import BadRequest
 
-# ========= ENV =========
+STATE_FILE = "state.json"
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "")
 YT_API_KEY = os.environ.get("YT_API_KEY", "")
 
-SCAN_LIMIT = int(os.environ.get("SCAN_LIMIT", "25"))
+SCAN_LIMIT = int(os.environ.get("SCAN_LIMIT", "15"))
+TZ = os.environ.get("TZ", "Europe/Madrid")
+
 PIN_LATEST = os.environ.get("PIN_LATEST", "1") == "1"
 DELETE_LIVE_WHEN_FINALIZED = os.environ.get("DELETE_LIVE_WHEN_FINALIZED", "1") == "1"
-
-# Si alguna vez se te desmadra y quieres “resetear” sin spamear:
-# ejecuta una vez con BASELINE_ONLY=1 y ya vuelve a la normalidad.
 BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
 
-STATE_FILE = "state.json"
-RSS_URL = f"https://www.youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}"
-YOUTUBE_VIDEOS_API = "https://www.googleapis.com/youtube/v3/videos"
 
-
-# ========= HELPERS =========
 def must_env(name, value):
     if not value:
         raise RuntimeError(f"Missing env var: {name}")
 
 
-def safe_text(s: str) -> str:
-    return (s or "").replace("\u0000", "").strip()
-
-
 def load_state():
     if not os.path.exists(STATE_FILE):
         return {}
+
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            st = json.load(f)
     except Exception:
         return {}
 
+    # Reparaciones defensivas ante “memoria corrupta”
+    if not isinstance(st, dict):
+        st = {}
+    if not isinstance(st.get("notified"), dict):
+        st["notified"] = {}
+    if not isinstance(st.get("msg_ids"), dict):
+        st["msg_ids"] = {}  # {"live:VID": 123, "video:VID": 456}
+    if not isinstance(st.get("pinned"), dict):
+        st["pinned"] = {}  # {"message_id": 123, "kind": "live|video", "vid": "..."}
 
-def save_state(state):
+    return st
+
+
+def save_state(st):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+        json.dump(st, f, ensure_ascii=False, indent=2)
 
 
-def sanitize_state(state):
-    """Autorepara state.json viejo/roto para evitar duplicados y crashes."""
-    if not isinstance(state, dict):
-        state = {}
-
-    def ensure_dict(k):
-        if not isinstance(state.get(k), dict):
-            state[k] = {}
-
-    ensure_dict("notified")           # vid -> epoch cuando se notificó
-    ensure_dict("msg_live")           # vid -> message_id del post LIVE
-    ensure_dict("msg_video")          # vid -> message_id del post VIDEO
-    ensure_dict("last_kind")          # vid -> "live"/"video"
-    if not isinstance(state.get("last_seen_epoch", 0), int):
-        state["last_seen_epoch"] = 0
-
-    # Pin tracking
-    if "pinned_message_id" in state and not isinstance(state["pinned_message_id"], int):
-        try:
-            state["pinned_message_id"] = int(state["pinned_message_id"])
-        except Exception:
-            state.pop("pinned_message_id", None)
-
-    return state
-
-
-def to_epoch(published_parsed):
-    if not published_parsed:
-        return 0
-    return int(time.mktime(published_parsed))
-
-
-def fmt_local_time(epoch: int) -> str:
-    dt = datetime.datetime.fromtimestamp(epoch)
-    return dt.strftime("%d/%m %H:%M")
-
-
-def fetch_feed_entries(limit: int):
-    feed = feedparser.parse(RSS_URL)
-    entries = feed.entries[: max(1, limit)]
-    out = []
-    for e in entries:
-        vid = getattr(e, "yt_videoid", None) or getattr(e, "yt_videoId", None)
-        title = safe_text(getattr(e, "title", ""))
-        link = safe_text(getattr(e, "link", ""))
-        thumb = None
-        try:
-            if hasattr(e, "media_thumbnail") and e.media_thumbnail:
-                thumb = e.media_thumbnail[0].get("url")
-        except Exception:
-            thumb = None
-        pub_epoch = to_epoch(getattr(e, "published_parsed", None)) or 0
-        out.append({"vid": vid, "title": title, "link": link, "thumb": thumb, "published_epoch": pub_epoch})
-    return out  # newest-first
-
-
-def yt_api_video_info(video_id: str):
-    """Devuelve si está EN DIRECTO AHORA MISMO + viewers o views."""
-    if not video_id:
-        return {"is_live_now": False, "concurrent_viewers": None, "view_count": None}
-
-    params = {"part": "liveStreamingDetails,statistics", "id": video_id, "key": YT_API_KEY}
-    r = requests.get(YOUTUBE_VIDEOS_API, params=params, timeout=20)
+def yt_get(url, params):
+    params = dict(params)
+    params["key"] = YT_API_KEY
+    r = requests.get(url, params=params, timeout=20)
     r.raise_for_status()
-    data = r.json()
+    return r.json()
+
+
+def yt_search_live_now():
+    # Devuelve el primer directo activo (si existe), si no: None
+    data = yt_get(
+        "https://www.googleapis.com/youtube/v3/search",
+        {
+            "part": "snippet",
+            "channelId": CHANNEL_ID,
+            "eventType": "live",
+            "type": "video",
+            "maxResults": 5,
+            "order": "date",
+        },
+    )
+    items = data.get("items", [])
+    if not items:
+        return None
+    vid = items[0]["id"]["videoId"]
+    return vid
+
+
+def yt_latest_public_video_id():
+    data = yt_get(
+        "https://www.googleapis.com/youtube/v3/search",
+        {
+            "part": "snippet",
+            "channelId": CHANNEL_ID,
+            "type": "video",
+            "maxResults": 1,
+            "order": "date",
+        },
+    )
+    items = data.get("items", [])
+    if not items:
+        return None
+    return items[0]["id"]["videoId"]
+
+
+def yt_video_info(video_id):
+    data = yt_get(
+        "https://www.googleapis.com/youtube/v3/videos",
+        {
+            "part": "snippet,statistics,liveStreamingDetails",
+            "id": video_id,
+            "maxResults": 1,
+        },
+    )
 
     items = data.get("items", [])
     if not items:
-        return {"is_live_now": False, "concurrent_viewers": None, "view_count": None}
+        return None
 
-    item = items[0]
-    live = item.get("liveStreamingDetails", {}) or {}
-    stats = item.get("statistics", {}) or {}
+    v = items[0]
+    snippet = v.get("snippet", {})
+    stats = v.get("statistics", {})
+    live = v.get("liveStreamingDetails", {})
 
+    title = snippet.get("title", "")
+    thumbs = snippet.get("thumbnails", {}) or {}
+    thumb = (
+        (thumbs.get("maxres") or {}).get("url")
+        or (thumbs.get("high") or {}).get("url")
+        or (thumbs.get("medium") or {}).get("url")
+        or (thumbs.get("default") or {}).get("url")
+    )
+
+    live_flag = (snippet.get("liveBroadcastContent") or "").lower()  # live / none / upcoming
+    is_live_now = (live_flag == "live")
+
+    concurrent = None
+    if "concurrentViewers" in live:
+        try:
+            concurrent = int(live["concurrentViewers"])
+        except Exception:
+            concurrent = None
+
+    view_count = None
+    if "viewCount" in stats:
+        try:
+            view_count = int(stats["viewCount"])
+        except Exception:
+            view_count = None
+
+    # publish / start time
+    published_at = snippet.get("publishedAt")  # ISO
     actual_start = live.get("actualStartTime")
     actual_end = live.get("actualEndTime")
 
-    is_live_now = bool(actual_start) and not bool(actual_end)
-
-    concurrent = live.get("concurrentViewers")
-    view_count = stats.get("viewCount")
-
     return {
+        "vid": video_id,
+        "title": title,
+        "thumb": thumb,
+        "link": f"https://www.youtube.com/watch?v={video_id}",
         "is_live_now": is_live_now,
-        "concurrent_viewers": int(concurrent) if concurrent is not None else None,
-        "view_count": int(view_count) if view_count is not None else None,
+        "concurrent_viewers": concurrent,
+        "view_count": view_count,
+        "published_at": published_at,
+        "actual_start": actual_start,
+        "actual_end": actual_end,
     }
 
 
-def download_bytes(url: str):
-    if not url:
-        return None
-    r = requests.get(url, timeout=20)
-    r.raise_for_status()
-    return r.content
+def format_caption(info, kind):
+    # kind: "live" or "video"
+    title = info["title"]
+    link = info["link"]
+
+    if kind == "live":
+        viewers = info.get("concurrent_viewers")
+        viewers_line = f"👀 {viewers} viewers\n" if viewers is not None else ""
+        when = info.get("actual_start") or info.get("published_at") or ""
+        when_line = f"🕒 {iso_to_local(when)}\n" if when else ""
+        return f"🔴 DIRECTO\n✨ {title}\n{viewers_line}{when_line}👉 {link}".strip()
+
+    # video
+    views = info.get("view_count")
+    views_line = f"👀 {views} views\n" if views is not None else ""
+    when = info.get("published_at") or ""
+    when_line = f"🕒 {iso_to_local(when)}\n" if when else ""
+    return f"🎥 NUEVO VÍDEO\n✨ {title}\n{views_line}{when_line}👉 {link}".strip()
 
 
-def build_caption(item, info):
-    is_live = info["is_live_now"]
-    header = "🔴 DIRECTO" if is_live else "🎥 NUEVO VÍDEO"
-
-    when_epoch = item.get("published_epoch") or 0
-    when_txt = fmt_local_time(when_epoch) if when_epoch else ""
-
-    line_views = ""
-    if is_live and info.get("concurrent_viewers") is not None:
-        line_views = f"👀 {info['concurrent_viewers']} viewers"
-    elif (not is_live) and info.get("view_count") is not None:
-        line_views = f"👀 {info['view_count']} views"
-
-    parts = [header, f"✨ {item['title']}"]
-    if line_views:
-        parts.append(line_views)
-    if when_txt:
-        parts.append(f"🕒 {when_txt}")
-    parts.append(f"👉 {item['link']}")
-    return "\n".join(parts)
-
-
-def tg_pin(bot, chat_id, message_id):
+def iso_to_local(iso_str):
+    # Mostramos algo legible sin depender de librerías extra:
+    # 2026-02-13T20:09:00Z -> 13/02 20:09 (aprox, en UTC si no hay tz)
     try:
-        bot.pin_chat_message(chat_id=chat_id, message_id=message_id, disable_notification=True)
-        return True
-    except Exception as e:
-        print("pin failed:", repr(e))
-        return False
+        # parse simple Z
+        dt = datetime.strptime(iso_str.replace("Z", ""), "%Y-%m-%dT%H:%M:%S")
+        return dt.strftime("%d/%m %H:%M")
+    except Exception:
+        return iso_str
 
 
-def tg_unpin(bot, chat_id, message_id):
-    try:
-        bot.unpin_chat_message(chat_id=chat_id, message_id=message_id)
-        return True
-    except Exception as e:
-        print("unpin failed:", repr(e))
-        return False
+def send_post(bot: Bot, chat_id: int, info, kind):
+    caption = format_caption(info, kind)
+    thumb = info.get("thumb")
 
-
-def tg_delete(bot, chat_id, message_id):
-    try:
-        bot.delete_message(chat_id=chat_id, message_id=message_id)
-        return True
-    except Exception as e:
-        print("delete failed:", repr(e))
-        return False
-
-
-def send_post(bot, chat_id, item, info, kind):
-    """Envía el post (foto si puede) y devuelve message_id."""
-    caption = build_caption(item, info)
-    msg = None
-
-    if item.get("thumb"):
+    if thumb:
         try:
-            photo_bytes = download_bytes(item["thumb"])
-            msg = bot.send_photo(chat_id=chat_id, photo=photo_bytes, caption=caption)
-        except Exception as e:
-            print("send_photo failed -> fallback text:", repr(e))
+            r = requests.get(thumb, timeout=20)
+            r.raise_for_status()
+            msg = bot.send_photo(chat_id=chat_id, photo=r.content, caption=caption)
+            return msg.message_id
+        except Exception:
+            pass
 
-    if msg is None:
-        msg = bot.send_message(chat_id=chat_id, text=caption)
-
+    msg = bot.send_message(chat_id=chat_id, text=caption, parse_mode=None)
     return msg.message_id
 
 
-def choose_pin_target(entries):
-    """
-    Prioridad:
-      1) Si hay algún directo activo -> ese
-      2) Si no -> el último (entries[0])
-    """
-    for it in entries:
-        try:
-            info = yt_api_video_info(it["vid"])
-            if info["is_live_now"]:
-                return it, info
-        except Exception as e:
-            print("live check failed (ignored):", repr(e))
-
-    it = entries[0]
-    info = yt_api_video_info(it["vid"])
-    return it, info
+def try_delete(bot: Bot, chat_id: int, message_id: int):
+    try:
+        bot.delete_message(chat_id=chat_id, message_id=message_id)
+        return True
+    except Exception:
+        return False
 
 
-# ========= MAIN RUN =========
+def try_pin(bot: Bot, chat_id: int, message_id: int):
+    try:
+        bot.pin_chat_message(chat_id=chat_id, message_id=message_id, disable_notification=True)
+        return True
+    except Exception:
+        return False
+
+
+def try_edit_caption(bot: Bot, chat_id: int, message_id: int, caption: str):
+    try:
+        bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=caption)
+        return True
+    except BadRequest:
+        return False
+    except Exception:
+        return False
+
+
 def run_once():
     must_env("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
     must_env("CHAT_ID", CHAT_ID)
@@ -243,126 +246,107 @@ def run_once():
     bot = Bot(token=TELEGRAM_TOKEN)
     chat_id = int(CHAT_ID)
 
-    state = sanitize_state(load_state())
+    state = load_state()
+    notified = state.setdefault("notified", {})
+    msg_ids = state.setdefault("msg_ids", {})
+    pinned = state.setdefault("pinned", {})
 
-    entries = fetch_feed_entries(SCAN_LIMIT)
-    if not entries:
-        print("No RSS entries.")
+    # 1) ¿Hay directo activo ahora mismo?
+    live_vid = yt_search_live_now()
+
+    # Si BASELINE_ONLY: solo fija correctamente según estado actual y guarda, SIN postear.
+    if BASELINE_ONLY:
+        if live_vid:
+            info = yt_video_info(live_vid)
+            # “baseline” del live (para que no spamee luego)
+            notified[f"live:{live_vid}"] = int(time.time())
+            # y dejamos listo el pin: si ya existe msg_id lo fijamos, si no, no posteamos
+            # (baseline no crea mensajes)
+        else:
+            latest_vid = yt_latest_public_video_id()
+            if latest_vid:
+                notified[f"video:{latest_vid}"] = int(time.time())
+
+        state["last_seen_epoch"] = int(time.time())
         save_state(state)
+        print("BASELINE_ONLY: state updated (no notifications).")
         return
 
-    newest_epoch = entries[0].get("published_epoch", 0)
+    # 2) Si hay live → prioridad live
+    if live_vid:
+        info = yt_video_info(live_vid)
+        if not info:
+            print("Live vid found but no info.")
+            return
 
-    # Baseline-only: NO notifica, solo fija el “punto de partida”
-    if BASELINE_ONLY or state.get("last_seen_epoch", 0) == 0:
-        state["last_seen_epoch"] = newest_epoch or int(time.time())
+        # Notificar live una sola vez
+        if f"live:{live_vid}" not in notified:
+            mid = send_post(bot, chat_id, info, kind="live")
+            msg_ids[f"live:{live_vid}"] = mid
+            notified[f"live:{live_vid}"] = int(time.time())
+            print("Notified LIVE:", live_vid, "msg_id", mid)
+        else:
+            mid = msg_ids.get(f"live:{live_vid}")
+
+        # Fijar live si procede
+        if PIN_LATEST and mid:
+            # si ya está fijado otro, lo reemplazamos fijando este (Telegram deja “historial”)
+            if pinned.get("message_id") != mid:
+                ok = try_pin(bot, chat_id, mid)
+                if ok:
+                    pinned.update({"message_id": mid, "kind": "live", "vid": live_vid})
+                    print("Pinned LIVE msg_id", mid)
+
+        state["last_seen_epoch"] = int(time.time())
         save_state(state)
-        print("Initialized baseline last_seen_epoch =", state["last_seen_epoch"], "(no notifications)")
+        print("State saved. last_seen_epoch =", state["last_seen_epoch"])
         return
 
-    last_seen_epoch = state["last_seen_epoch"]
+    # 3) No hay live ahora mismo → fijar último vídeo público
+    latest_vid = yt_latest_public_video_id()
+    if not latest_vid:
+        print("No latest video found.")
+        return
 
-    # 1) Notificar nuevos (por published_epoch) SIN duplicar
-    entries_sorted = sorted(entries, key=lambda x: x.get("published_epoch", 0))
-    new_items = [it for it in entries_sorted if it.get("published_epoch", 0) > last_seen_epoch]
+    info = yt_video_info(latest_vid)
+    if not info:
+        print("Latest vid found but no info.")
+        return
 
-    for it in new_items:
-        vid = it["vid"]
-        if not vid:
-            continue
-        if vid in state["notified"]:
-            continue
+    # Si antes había un live fijado, y quieres “limpiar” al terminar:
+    if DELETE_LIVE_WHEN_FINALIZED and pinned.get("kind") == "live":
+        prev_live_vid = pinned.get("vid")
+        prev_live_mid = pinned.get("message_id")
+        # Si el live ya terminó, lo borramos (si podemos)
+        if prev_live_mid:
+            deleted = try_delete(bot, chat_id, prev_live_mid)
+            print("Deleted previous live pinned:", deleted, "msg_id", prev_live_mid)
 
-        info = yt_api_video_info(vid)
-        kind = "live" if info["is_live_now"] else "video"
+    # Notificar vídeo una sola vez
+    if f"video:{latest_vid}" not in notified:
+        mid = send_post(bot, chat_id, info, kind="video")
+        msg_ids[f"video:{latest_vid}"] = mid
+        notified[f"video:{latest_vid}"] = int(time.time())
+        print("Notified VIDEO:", latest_vid, "msg_id", mid)
+    else:
+        mid = msg_ids.get(f"video:{latest_vid}")
 
-        # Si ya hay mensaje de ese kind guardado -> no reenviar
-        if kind == "live" and vid in state["msg_live"]:
-            state["notified"][vid] = int(time.time())
-            continue
-        if kind == "video" and vid in state["msg_video"]:
-            state["notified"][vid] = int(time.time())
-            continue
+        # (opcional) si ya existía el mensaje, intentamos actualizar caption con views actuales
+        if mid:
+            cap = format_caption(info, kind="video")
+            try_edit_caption(bot, chat_id, mid, cap)
 
-        mid = send_post(bot, chat_id, it, info, kind)
-        state["notified"][vid] = int(time.time())
-        state["last_kind"][vid] = kind
-        if kind == "live":
-            state["msg_live"][vid] = mid
-        else:
-            state["msg_video"][vid] = mid
+    # Fijar vídeo
+    if PIN_LATEST and mid:
+        if pinned.get("message_id") != mid:
+            ok = try_pin(bot, chat_id, mid)
+            if ok:
+                pinned.update({"message_id": mid, "kind": "video", "vid": latest_vid})
+                print("Pinned VIDEO msg_id", mid)
 
-        print("Notified:", vid, it["title"], "kind:", kind, "mid:", mid)
-
-    if newest_epoch > last_seen_epoch:
-        state["last_seen_epoch"] = newest_epoch
-
-    # 2) Conversión PRO: si un vid que teníamos como LIVE ya NO está live -> publicar VIDEO y borrar LIVE
-    # (Esto arregla el “acabó el directo y se quedó 🔴 para siempre”.)
-    for vid, live_mid in list(state["msg_live"].items()):
-        try:
-            info_now = yt_api_video_info(vid)
-        except Exception as e:
-            print("live recheck failed:", vid, repr(e))
-            continue
-
-        if not info_now["is_live_now"]:
-            # Ya terminó -> asegurar post de VIDEO
-            if vid not in state["msg_video"]:
-                # buscamos el item en el feed (si está en SCAN_LIMIT)
-                item = next((x for x in entries if x["vid"] == vid), None)
-                if item:
-                    mid_video = send_post(bot, chat_id, item, info_now, "video")
-                    state["msg_video"][vid] = mid_video
-                    state["last_kind"][vid] = "video"
-                    state["notified"].setdefault(vid, int(time.time()))
-                    print("Converted to video:", vid, "video_mid:", mid_video)
-                else:
-                    # si no está en el feed (muy raro), no hacemos nada
-                    pass
-
-            # borrar el LIVE antiguo (si procede)
-            if DELETE_LIVE_WHEN_FINALIZED and vid in state["msg_video"]:
-                # si el LIVE estaba pineado, lo desanclamos antes
-                if state.get("pinned_message_id") == live_mid:
-                    tg_unpin(bot, chat_id, live_mid)
-                tg_delete(bot, chat_id, live_mid)
-                state["msg_live"].pop(vid, None)
-
-    # 3) Pin siempre correcto
-    if PIN_LATEST:
-        target_item, target_info = choose_pin_target(entries)
-        target_vid = target_item["vid"]
-        target_kind = "live" if target_info["is_live_now"] else "video"
-
-        # Asegurar que existe el mensaje que vamos a pinear
-        if target_kind == "live":
-            if target_vid not in state["msg_live"]:
-                mid = send_post(bot, chat_id, target_item, target_info, "live")
-                state["msg_live"][target_vid] = mid
-                state["last_kind"][target_vid] = "live"
-                state["notified"].setdefault(target_vid, int(time.time()))
-            pin_mid = state["msg_live"][target_vid]
-        else:
-            if target_vid not in state["msg_video"]:
-                mid = send_post(bot, chat_id, target_item, target_info, "video")
-                state["msg_video"][target_vid] = mid
-                state["last_kind"][target_vid] = "video"
-                state["notified"].setdefault(target_vid, int(time.time()))
-            pin_mid = state["msg_video"][target_vid]
-
-        prev_pin_mid = state.get("pinned_message_id")
-
-        if prev_pin_mid != pin_mid:
-            if prev_pin_mid:
-                tg_unpin(bot, chat_id, prev_pin_mid)
-            if tg_pin(bot, chat_id, pin_mid):
-                state["pinned_message_id"] = pin_mid
-                state["pinned_vid"] = target_vid
-                state["pinned_kind"] = target_kind
-
+    state["last_seen_epoch"] = int(time.time())
     save_state(state)
-    print("State saved. last_seen_epoch =", state.get("last_seen_epoch"))
+    print("State saved. last_seen_epoch =", state["last_seen_epoch"])
 
 
 def main():
