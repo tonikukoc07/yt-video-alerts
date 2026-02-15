@@ -2,17 +2,19 @@
   "notified": {
     "video:mhf3iEC0aDs": 1771022991,
     "video:BlWjtZICLl4": 1771031322,
-    "live:svzaKhulMSE": 1771147788
+    "live:svzaKhulMSE": 1771147788,
+    "video:svzaKhulMSE": 1771152895
   },
   "msg_ids": {
     "video:mhf3iEC0aDs": 97,
     "video:BlWjtZICLl4": 99,
-    "live:svzaKhulMSE": 101
+    "live:svzaKhulMSE": 101,
+    "video:svzaKhulMSE": 103
   },
   "pinned": {
-    "message_id": 101,
-    "kind": "live",
+    "message_id": 103,
+    "kind": "video",
     "vid": "svzaKhulMSE"
   },
-  "last_seen_epoch": 1771151306
+  "last_seen_epoch": 1771152895
 }
