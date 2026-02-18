@@ -11,7 +11,8 @@
     "live:6-Eo_6HqSwo": 1771267174,
     "video:6-Eo_6HqSwo": 1771269693,
     "live:jolziyuDNPI": 1771322777,
-    "video:jolziyuDNPI": 1771342333
+    "video:jolziyuDNPI": 1771342333,
+    "live:qxv8R8KEGJw": 1771408556
   },
   "msg_ids": {
     "video:mhf3iEC0aDs": 97,
@@ -25,12 +26,13 @@
     "live:6-Eo_6HqSwo": 113,
     "video:6-Eo_6HqSwo": 115,
     "live:jolziyuDNPI": 117,
-    "video:jolziyuDNPI": 119
+    "video:jolziyuDNPI": 119,
+    "live:qxv8R8KEGJw": 121
   },
   "pinned": {
-    "message_id": 119,
-    "kind": "video",
-    "vid": "jolziyuDNPI"
+    "message_id": 121,
+    "kind": "live",
+    "vid": "qxv8R8KEGJw"
   },
-  "last_seen_epoch": 1771405113
+  "last_seen_epoch": 1771408556
 }
