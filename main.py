@@ -3,8 +3,6 @@ import json
 import time
 import requests
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
-
 from telegram import Bot
 from telegram.error import BadRequest
 
@@ -19,6 +17,8 @@ SCAN_LIMIT = int(os.environ.get("SCAN_LIMIT", "15"))
 TZ = os.environ.get("TZ", "Europe/Madrid")
 
 PIN_LATEST = os.environ.get("PIN_LATEST", "1") == "1"
+# OJO: ya NO borramos mensajes aunque esta variable exista:
+DELETE_LIVE_WHEN_FINALIZED = os.environ.get("DELETE_LIVE_WHEN_FINALIZED", "1") == "1"
 BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
 
 
@@ -37,6 +37,7 @@ def load_state():
     except Exception:
         return {}
 
+    # Reparaciones defensivas ante “memoria corrupta”
     if not isinstance(st, dict):
         st = {}
     if not isinstance(st.get("notified"), dict):
@@ -63,6 +64,7 @@ def yt_get(url, params):
 
 
 def yt_search_live_now():
+    # Devuelve el primer directo activo (si existe), si no: None
     data = yt_get(
         "https://www.googleapis.com/youtube/v3/search",
         {
@@ -77,7 +79,8 @@ def yt_search_live_now():
     items = data.get("items", [])
     if not items:
         return None
-    return items[0]["id"]["videoId"]
+    vid = items[0]["id"]["videoId"]
+    return vid
 
 
 def yt_latest_public_video_id():
@@ -125,7 +128,7 @@ def yt_video_info(video_id):
         or (thumbs.get("default") or {}).get("url")
     )
 
-    live_flag = (snippet.get("liveBroadcastContent") or "").lower()
+    live_flag = (snippet.get("liveBroadcastContent") or "").lower()  # live / none / upcoming
     is_live_now = (live_flag == "live")
 
     concurrent = None
@@ -142,7 +145,7 @@ def yt_video_info(video_id):
         except Exception:
             view_count = None
 
-    published_at = snippet.get("publishedAt")
+    published_at = snippet.get("publishedAt")  # ISO
     actual_start = live.get("actualStartTime")
     actual_end = live.get("actualEndTime")
 
@@ -161,21 +164,35 @@ def yt_video_info(video_id):
 
 
 def iso_to_local(iso_str):
+    """
+    Convierte ISO de YouTube (normalmente UTC con 'Z') a hora local según TZ env (por defecto Europe/Madrid).
+    Ej: 2026-02-16T08:22:00Z -> 16/02 09:22 (Madrid en invierno)
+    """
     try:
-        if iso_str.endswith("Z"):
-            dt_utc = datetime.strptime(iso_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        else:
-            dt_utc = datetime.fromisoformat(iso_str)
-            if dt_utc.tzinfo is None:
-                dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+        from zoneinfo import ZoneInfo  # Python 3.9+
+        tz = ZoneInfo(TZ or "Europe/Madrid")
 
-        dt_local = dt_utc.astimezone(ZoneInfo(TZ))
-        return dt_local.strftime("%d/%m %H:%M")
+        s = (iso_str or "").strip()
+        if not s:
+            return ""
+
+        # YouTube suele traer 'Z' (UTC). fromisoformat no acepta 'Z' directamente.
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+
+        dt = datetime.fromisoformat(s)
+
+        # Si viene sin tzinfo, asumimos UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt.astimezone(tz).strftime("%d/%m %H:%M")
     except Exception:
         return iso_str
 
 
 def format_caption(info, kind):
+    # kind: "live" or "video"
     title = info["title"]
     link = info["link"]
 
@@ -219,6 +236,7 @@ def try_pin(bot: Bot, chat_id: int, message_id: int):
 
 
 def try_unpin_all(bot: Bot, chat_id: int):
+    # ✅ Esto elimina TODOS los mensajes fijados del chat (NO borra mensajes)
     try:
         bot.unpin_all_chat_messages(chat_id=chat_id)
         return True
@@ -236,18 +254,6 @@ def try_edit_caption(bot: Bot, chat_id: int, message_id: int, caption: str):
         return False
 
 
-def pin_only_this(bot: Bot, chat_id: int, pinned_state: dict, message_id: int, kind: str, vid: str):
-    # Deja SOLO 1 pin
-    if pinned_state.get("message_id") != message_id:
-        try_unpin_all(bot, chat_id)
-        ok = try_pin(bot, chat_id, message_id)
-        if ok:
-            pinned_state.update({"message_id": message_id, "kind": kind, "vid": vid})
-            print("Pinned", kind, "msg_id", message_id)
-        else:
-            print("Pin failed for msg_id", message_id)
-
-
 def run_once():
     must_env("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
     must_env("CHAT_ID", CHAT_ID)
@@ -262,8 +268,10 @@ def run_once():
     msg_ids = state.setdefault("msg_ids", {})
     pinned = state.setdefault("pinned", {})
 
+    # 1) ¿Hay directo activo ahora mismo?
     live_vid = yt_search_live_now()
 
+    # Si BASELINE_ONLY: solo fija baseline y guarda SIN postear.
     if BASELINE_ONLY:
         if live_vid:
             notified[f"live:{live_vid}"] = int(time.time())
@@ -277,31 +285,36 @@ def run_once():
         print("BASELINE_ONLY: state updated (no notifications).")
         return
 
-    # -------- LIVE --------
+    # 2) Si hay live → prioridad live
     if live_vid:
         info = yt_video_info(live_vid)
         if not info:
             print("Live vid found but no info.")
             return
 
-        key_live = f"live:{live_vid}"
-        if key_live not in notified:
+        if f"live:{live_vid}" not in notified:
             mid = send_post(bot, chat_id, info, kind="live")
-            msg_ids[key_live] = mid
-            notified[key_live] = int(time.time())
+            msg_ids[f"live:{live_vid}"] = mid
+            notified[f"live:{live_vid}"] = int(time.time())
             print("Notified LIVE:", live_vid, "msg_id", mid)
         else:
-            mid = msg_ids.get(key_live)
+            mid = msg_ids.get(f"live:{live_vid}")
 
+        # ✅ PIN: desancla todos y ancla SOLO el más reciente (NO borra mensajes)
         if PIN_LATEST and mid:
-            pin_only_this(bot, chat_id, pinned, mid, "live", live_vid)
+            if pinned.get("message_id") != mid:
+                try_unpin_all(bot, chat_id)
+                ok = try_pin(bot, chat_id, mid)
+                if ok:
+                    pinned.update({"message_id": mid, "kind": "live", "vid": live_vid})
+                    print("Pinned LIVE msg_id", mid)
 
         state["last_seen_epoch"] = int(time.time())
         save_state(state)
         print("State saved. last_seen_epoch =", state["last_seen_epoch"])
         return
 
-    # -------- NO LIVE -> VIDEO --------
+    # 3) No hay live → último vídeo público
     latest_vid = yt_latest_public_video_id()
     if not latest_vid:
         print("No latest video found.")
@@ -312,45 +325,30 @@ def run_once():
         print("Latest vid found but no info.")
         return
 
-    key_video = f"video:{latest_vid}"
-    key_live_same = f"live:{latest_vid}"
+    # ⚠️ IMPORTANTE:
+    # Antes borrabas el mensaje del live al finalizar.
+    # Tú pediste NO eliminar mensajes, así que aquí NO borramos nada.
+    # Solo nos encargamos del PIN más reciente.
 
-    # ✅ CLAVE: si ese vídeo fue el mismo directo antes, NO postear otro.
-    if key_video not in notified:
-        if key_live_same in msg_ids:
-            # Reutiliza el mensaje del directo y lo convierte a vídeo editando el caption
-            mid = msg_ids.get(key_live_same)
-            if mid:
-                cap = format_caption(info, kind="video")
-                ok = try_edit_caption(bot, chat_id, mid, cap)
-                if ok:
-                    msg_ids[key_video] = mid
-                    notified[key_video] = int(time.time())
-                    print("Converted LIVE->VIDEO by editing msg_id", mid)
-                else:
-                    # Si no se puede editar (raro), entonces sí publica uno nuevo
-                    mid = send_post(bot, chat_id, info, kind="video")
-                    msg_ids[key_video] = mid
-                    notified[key_video] = int(time.time())
-                    print("Edit failed, posted VIDEO:", latest_vid, "msg_id", mid)
-            else:
-                mid = send_post(bot, chat_id, info, kind="video")
-                msg_ids[key_video] = mid
-                notified[key_video] = int(time.time())
-                print("No live msg_id, posted VIDEO:", latest_vid, "msg_id", mid)
-        else:
-            mid = send_post(bot, chat_id, info, kind="video")
-            msg_ids[key_video] = mid
-            notified[key_video] = int(time.time())
-            print("Notified VIDEO:", latest_vid, "msg_id", mid)
+    if f"video:{latest_vid}" not in notified:
+        mid = send_post(bot, chat_id, info, kind="video")
+        msg_ids[f"video:{latest_vid}"] = mid
+        notified[f"video:{latest_vid}"] = int(time.time())
+        print("Notified VIDEO:", latest_vid, "msg_id", mid)
     else:
-        mid = msg_ids.get(key_video)
+        mid = msg_ids.get(f"video:{latest_vid}")
         if mid:
             cap = format_caption(info, kind="video")
             try_edit_caption(bot, chat_id, mid, cap)
 
+    # ✅ PIN: desancla todos y ancla SOLO el más reciente (NO borra mensajes)
     if PIN_LATEST and mid:
-        pin_only_this(bot, chat_id, pinned, mid, "video", latest_vid)
+        if pinned.get("message_id") != mid:
+            try_unpin_all(bot, chat_id)
+            ok = try_pin(bot, chat_id, mid)
+            if ok:
+                pinned.update({"message_id": mid, "kind": "video", "vid": latest_vid})
+                print("Pinned VIDEO msg_id", mid)
 
     state["last_seen_epoch"] = int(time.time())
     save_state(state)
