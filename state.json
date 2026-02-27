@@ -100,9 +100,9 @@
     "video:I2rPXoMdyNo": 192
   },
   "pinned": {
-    "message_id": 192,
-    "kind": "live",
-    "vid": "I2rPXoMdyNo"
+    "message_id": 190,
+    "kind": "video",
+    "vid": "5QdCSANeyuI"
   },
-  "last_seen_epoch": 1772229383
+  "last_seen_epoch": 1772230920
 }
