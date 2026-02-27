@@ -17,7 +17,7 @@ SCAN_LIMIT = int(os.environ.get("SCAN_LIMIT", "15"))
 TZ = os.environ.get("TZ", "Europe/Madrid")
 
 PIN_LATEST = os.environ.get("PIN_LATEST", "1") == "1"
-# OJO: ya NO borramos mensajes aunque esta variable exista:
+# OJO: NO borramos mensajes aunque esta variable exista:
 DELETE_LIVE_WHEN_FINALIZED = os.environ.get("DELETE_LIVE_WHEN_FINALIZED", "1") == "1"
 BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
 
@@ -176,13 +176,11 @@ def iso_to_local(iso_str):
         if not s:
             return ""
 
-        # YouTube suele traer 'Z' (UTC). fromisoformat no acepta 'Z' directamente.
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
 
         dt = datetime.fromisoformat(s)
 
-        # Si viene sin tzinfo, asumimos UTC
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
 
@@ -236,7 +234,7 @@ def try_pin(bot: Bot, chat_id: int, message_id: int):
 
 
 def try_unpin_all(bot: Bot, chat_id: int):
-    # ✅ Esto elimina TODOS los mensajes fijados del chat (NO borra mensajes)
+    # ✅ Quita TODOS los pins (NO borra mensajes)
     try:
         bot.unpin_all_chat_messages(chat_id=chat_id)
         return True
@@ -247,6 +245,17 @@ def try_unpin_all(bot: Bot, chat_id: int):
 def try_edit_caption(bot: Bot, chat_id: int, message_id: int, caption: str):
     try:
         bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=caption)
+        return True
+    except BadRequest:
+        return False
+    except Exception:
+        return False
+
+
+def try_edit_text(bot: Bot, chat_id: int, message_id: int, text: str):
+    # Por si el post fue texto (no foto)
+    try:
+        bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode=None)
         return True
     except BadRequest:
         return False
@@ -278,6 +287,7 @@ def run_once():
         else:
             latest_vid = yt_latest_public_video_id()
             if latest_vid:
+                # IMPORTANTE: marcamos también live: y video: por si venías de líos previos
                 notified[f"video:{latest_vid}"] = int(time.time())
 
         state["last_seen_epoch"] = int(time.time())
@@ -300,7 +310,7 @@ def run_once():
         else:
             mid = msg_ids.get(f"live:{live_vid}")
 
-        # ✅ PIN: desancla todos y ancla SOLO el más reciente (NO borra mensajes)
+        # ✅ PIN: desancla todos y ancla SOLO el más reciente
         if PIN_LATEST and mid:
             if pinned.get("message_id") != mid:
                 try_unpin_all(bot, chat_id)
@@ -325,21 +335,46 @@ def run_once():
         print("Latest vid found but no info.")
         return
 
-    # ⚠️ IMPORTANTE:
-    # Antes borrabas el mensaje del live al finalizar.
-    # Tú pediste NO eliminar mensajes, así que aquí NO borramos nada.
-    # Solo nos encargamos del PIN más reciente.
+    # ✅ CLAVE ANTI-DUPLICADOS:
+    # Si este vídeo ya fue notificado como LIVE antes (misma VID),
+    # NO publicamos un nuevo mensaje. Editamos el mensaje del live para convertirlo a "NUEVO VÍDEO".
+    live_mid_same_vid = msg_ids.get(f"live:{latest_vid}")
+    if live_mid_same_vid and f"video:{latest_vid}" not in notified:
+        new_cap = format_caption(info, kind="video")
 
-    if f"video:{latest_vid}" not in notified:
-        mid = send_post(bot, chat_id, info, kind="video")
-        msg_ids[f"video:{latest_vid}"] = mid
-        notified[f"video:{latest_vid}"] = int(time.time())
-        print("Notified VIDEO:", latest_vid, "msg_id", mid)
+        # Intentamos editar caption (si era foto), si falla probamos texto.
+        edited = try_edit_caption(bot, chat_id, live_mid_same_vid, new_cap)
+        if not edited:
+            edited = try_edit_text(bot, chat_id, live_mid_same_vid, new_cap)
+
+        if edited:
+            # Lo registramos como "video" usando el MISMO message_id (así nunca duplica)
+            msg_ids[f"video:{latest_vid}"] = live_mid_same_vid
+            notified[f"video:{latest_vid}"] = int(time.time())
+            print("Converted LIVE->VIDEO by editing msg_id", live_mid_same_vid)
+
+            # Y el pin apunta a ese mismo mensaje
+            mid = live_mid_same_vid
+        else:
+            # Si no se pudo editar (casos raros), caemos al flujo normal (publicar vídeo)
+            mid = None
     else:
-        mid = msg_ids.get(f"video:{latest_vid}")
-        if mid:
-            cap = format_caption(info, kind="video")
-            try_edit_caption(bot, chat_id, mid, cap)
+        mid = None
+
+    # Flujo normal de vídeo si no hemos convertido por edición
+    if mid is None:
+        if f"video:{latest_vid}" not in notified:
+            mid = send_post(bot, chat_id, info, kind="video")
+            msg_ids[f"video:{latest_vid}"] = mid
+            notified[f"video:{latest_vid}"] = int(time.time())
+            print("Notified VIDEO:", latest_vid, "msg_id", mid)
+        else:
+            mid = msg_ids.get(f"video:{latest_vid}")
+            if mid:
+                cap = format_caption(info, kind="video")
+                # Si ya existía el mensaje, intentamos actualizarlo
+                if not try_edit_caption(bot, chat_id, mid, cap):
+                    try_edit_text(bot, chat_id, mid, cap)
 
     # ✅ PIN: desancla todos y ancla SOLO el más reciente (NO borra mensajes)
     if PIN_LATEST and mid:
