@@ -116,9 +116,9 @@
     "video:it2HRLfzJkM": 202
   },
   "pinned": {
-    "message_id": 202,
-    "kind": "live",
-    "vid": "it2HRLfzJkM"
+    "message_id": 198,
+    "kind": "video",
+    "vid": "S0RrL5HUxkI"
   },
-  "last_seen_epoch": 1772400713
+  "last_seen_epoch": 1772401689
 }
