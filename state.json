@@ -98,7 +98,8 @@
     "video:RKrsGJMiSEw": 1773667059,
     "live:ptn0OicEKGU": 1773679459,
     "video:ptn0OicEKGU": 1773694500,
-    "live:YLTm8Onuphk": 1773765993
+    "live:YLTm8Onuphk": 1773765993,
+    "video:YLTm8Onuphk": 1773778866
   },
   "msg_ids": {
     "video:mhf3iEC0aDs": 97,
@@ -199,12 +200,13 @@
     "video:RKrsGJMiSEw": 246,
     "live:ptn0OicEKGU": 248,
     "video:ptn0OicEKGU": 248,
-    "live:YLTm8Onuphk": 251
+    "live:YLTm8Onuphk": 251,
+    "video:YLTm8Onuphk": 251
   },
   "pinned": {
     "message_id": 251,
     "kind": "live",
     "vid": "YLTm8Onuphk"
   },
-  "last_seen_epoch": 1773776412
+  "last_seen_epoch": 1773778866
 }
