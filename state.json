@@ -200,9 +200,9 @@
     "video:ptn0OicEKGU": 248
   },
   "pinned": {
-    "message_id": 248,
-    "kind": "live",
-    "vid": "ptn0OicEKGU"
+    "message_id": 246,
+    "kind": "video",
+    "vid": "RKrsGJMiSEw"
   },
-  "last_seen_epoch": 1773705711
+  "last_seen_epoch": 1773715843
 }
