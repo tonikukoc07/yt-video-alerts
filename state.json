@@ -210,9 +210,9 @@
     "live:gJt9ot89YZI": 255
   },
   "pinned": {
-    "message_id": 255,
-    "kind": "live",
-    "vid": "gJt9ot89YZI"
+    "message_id": 253,
+    "kind": "video",
+    "vid": "63N5JLAkTfo"
   },
-  "last_seen_epoch": 1773863674
+  "last_seen_epoch": 1773865782
 }
