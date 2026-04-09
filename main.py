@@ -3,7 +3,7 @@ import json
 import time
 import requests
 from datetime import datetime, timezone
-from telegram import Bot
+from telegram import Bot, InputMediaPhoto
 from telegram.error import BadRequest
 
 STATE_FILE = "state.json"
@@ -46,6 +46,8 @@ def load_state():
         st["msg_ids"] = {}  # {"live:VID": 123, "video:VID": 456}
     if not isinstance(st.get("pinned"), dict):
         st["pinned"] = {}  # {"message_id": 123, "kind": "live|video", "vid": "..."}
+    if not isinstance(st.get("thumbs"), dict):
+        st["thumbs"] = {}  # {"VID": "https://...jpg"}
 
     return st
 
@@ -263,6 +265,17 @@ def try_edit_text(bot: Bot, chat_id: int, message_id: int, text: str):
         return False
 
 
+def try_edit_media(bot: Bot, chat_id: int, message_id: int, photo_bytes, caption: str):
+    try:
+        media = InputMediaPhoto(media=photo_bytes, caption=caption)
+        bot.edit_message_media(chat_id=chat_id, message_id=message_id, media=media)
+        return True
+    except BadRequest:
+        return False
+    except Exception:
+        return False
+
+
 def run_once():
     must_env("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
     must_env("CHAT_ID", CHAT_ID)
@@ -276,6 +289,7 @@ def run_once():
     notified = state.setdefault("notified", {})
     msg_ids = state.setdefault("msg_ids", {})
     pinned = state.setdefault("pinned", {})
+    thumbs = state.setdefault("thumbs", {})
 
     # 1) ¿Hay directo activo ahora mismo?
     live_vid = yt_search_live_now()
@@ -306,6 +320,7 @@ def run_once():
             mid = send_post(bot, chat_id, info, kind="live")
             msg_ids[f"live:{live_vid}"] = mid
             notified[f"live:{live_vid}"] = int(time.time())
+            thumbs[live_vid] = info.get("thumb")
             print("Notified LIVE:", live_vid, "msg_id", mid)
         else:
             mid = msg_ids.get(f"live:{live_vid}")
@@ -341,22 +356,33 @@ def run_once():
     live_mid_same_vid = msg_ids.get(f"live:{latest_vid}")
     if live_mid_same_vid and f"video:{latest_vid}" not in notified:
         new_cap = format_caption(info, kind="video")
+        old_thumb = thumbs.get(latest_vid)
+        new_thumb = info.get("thumb")
 
-        # Intentamos editar caption (si era foto), si falla probamos texto.
-        edited = try_edit_caption(bot, chat_id, live_mid_same_vid, new_cap)
+        edited = False
+
+        # Solo al pasar de live a video, si cambió la portada, cambia la foto
+        if old_thumb and new_thumb and old_thumb != new_thumb:
+            try:
+                r = requests.get(new_thumb, timeout=20)
+                r.raise_for_status()
+                edited = try_edit_media(bot, chat_id, live_mid_same_vid, r.content, new_cap)
+            except Exception:
+                edited = False
+
+        # Si no cambió portada o falló media, cambia solo caption/texto
         if not edited:
-            edited = try_edit_text(bot, chat_id, live_mid_same_vid, new_cap)
+            edited = try_edit_caption(bot, chat_id, live_mid_same_vid, new_cap)
+            if not edited:
+                edited = try_edit_text(bot, chat_id, live_mid_same_vid, new_cap)
 
         if edited:
-            # Lo registramos como "video" usando el MISMO message_id (así nunca duplica)
             msg_ids[f"video:{latest_vid}"] = live_mid_same_vid
             notified[f"video:{latest_vid}"] = int(time.time())
+            thumbs[latest_vid] = new_thumb
             print("Converted LIVE->VIDEO by editing msg_id", live_mid_same_vid)
-
-            # Y el pin apunta a ese mismo mensaje
             mid = live_mid_same_vid
         else:
-            # Si no se pudo editar (casos raros), caemos al flujo normal (publicar vídeo)
             mid = None
     else:
         mid = None
@@ -367,6 +393,7 @@ def run_once():
             mid = send_post(bot, chat_id, info, kind="video")
             msg_ids[f"video:{latest_vid}"] = mid
             notified[f"video:{latest_vid}"] = int(time.time())
+            thumbs[latest_vid] = info.get("thumb")
             print("Notified VIDEO:", latest_vid, "msg_id", mid)
         else:
             mid = msg_ids.get(f"video:{latest_vid}")
@@ -375,6 +402,7 @@ def run_once():
                 # Si ya existía el mensaje, intentamos actualizarlo
                 if not try_edit_caption(bot, chat_id, mid, cap):
                     try_edit_text(bot, chat_id, mid, cap)
+                thumbs[latest_vid] = info.get("thumb")
 
     # ✅ PIN: desancla todos y ancla SOLO el más reciente (NO borra mensajes)
     if PIN_LATEST and mid:
