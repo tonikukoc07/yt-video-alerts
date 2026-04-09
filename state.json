@@ -356,5 +356,8 @@
     "kind": "live",
     "vid": "nO8AYyTOi1A"
   },
-  "last_seen_epoch": 1775727641
+  "last_seen_epoch": 1775729374,
+  "thumbs": {
+    "nO8AYyTOi1A": "https://i.ytimg.com/vi/nO8AYyTOi1A/maxresdefault_live.jpg"
+  }
 }
