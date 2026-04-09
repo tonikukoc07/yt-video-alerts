@@ -348,9 +348,9 @@
     "video:hiDfPI4aSs8": 337
   },
   "pinned": {
-    "message_id": 337,
-    "kind": "live",
-    "vid": "hiDfPI4aSs8"
+    "message_id": 335,
+    "kind": "video",
+    "vid": "SSqpy7HLCHs"
   },
-  "last_seen_epoch": 1775693034
+  "last_seen_epoch": 1775705012
 }
