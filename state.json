@@ -194,7 +194,8 @@
     "video:AYbzgpj9yXs": 1776261750,
     "video:ylVOMWk3npM": 1776266122,
     "live:L3YmbUXie4k": 1776333990,
-    "video:L3YmbUXie4k": 1776338304
+    "video:L3YmbUXie4k": 1776338304,
+    "live:A5Gf_YBb2fQ": 1776420932
   },
   "msg_ids": {
     "video:mhf3iEC0aDs": 97,
@@ -391,14 +392,15 @@
     "video:AYbzgpj9yXs": 363,
     "video:ylVOMWk3npM": 365,
     "live:L3YmbUXie4k": 368,
-    "video:L3YmbUXie4k": 368
+    "video:L3YmbUXie4k": 368,
+    "live:A5Gf_YBb2fQ": 370
   },
   "pinned": {
-    "message_id": 368,
+    "message_id": 370,
     "kind": "live",
-    "vid": "L3YmbUXie4k"
+    "vid": "A5Gf_YBb2fQ"
   },
-  "last_seen_epoch": 1776416269,
+  "last_seen_epoch": 1776420933,
   "thumbs": {
     "nO8AYyTOi1A": "https://i.ytimg.com/vi/nO8AYyTOi1A/maxresdefault.jpg",
     "rkLVLDqPc40": "https://i.ytimg.com/vi/rkLVLDqPc40/maxresdefault.jpg",
@@ -411,6 +413,7 @@
     "suMpSWuhPrg": "https://i.ytimg.com/vi/suMpSWuhPrg/maxresdefault.jpg",
     "AYbzgpj9yXs": "https://i.ytimg.com/vi/AYbzgpj9yXs/maxresdefault.jpg",
     "ylVOMWk3npM": "https://i.ytimg.com/vi/ylVOMWk3npM/maxresdefault.jpg",
-    "L3YmbUXie4k": "https://i.ytimg.com/vi/L3YmbUXie4k/maxresdefault.jpg"
+    "L3YmbUXie4k": "https://i.ytimg.com/vi/L3YmbUXie4k/maxresdefault.jpg",
+    "A5Gf_YBb2fQ": "https://i.ytimg.com/vi/A5Gf_YBb2fQ/maxresdefault_live.jpg"
   }
 }
