@@ -410,11 +410,11 @@
     "video:yRJB-LhwVAs": 377
   },
   "pinned": {
-    "message_id": 377,
-    "kind": "live",
-    "vid": "yRJB-LhwVAs"
+    "message_id": 375,
+    "kind": "video",
+    "vid": "VAFNyVpiqGo"
   },
-  "last_seen_epoch": 1776549834,
+  "last_seen_epoch": 1776552669,
   "thumbs": {
     "nO8AYyTOi1A": "https://i.ytimg.com/vi/nO8AYyTOi1A/maxresdefault.jpg",
     "rkLVLDqPc40": "https://i.ytimg.com/vi/rkLVLDqPc40/maxresdefault.jpg",
@@ -430,7 +430,7 @@
     "L3YmbUXie4k": "https://i.ytimg.com/vi/L3YmbUXie4k/maxresdefault.jpg",
     "A5Gf_YBb2fQ": "https://i.ytimg.com/vi/A5Gf_YBb2fQ/maxresdefault.jpg",
     "GlSyUbyWaec": "https://i.ytimg.com/vi/GlSyUbyWaec/maxresdefault.jpg",
-    "VAFNyVpiqGo": "https://i.ytimg.com/vi/VAFNyVpiqGo/maxresdefault_live.jpg",
+    "VAFNyVpiqGo": "https://i.ytimg.com/vi/VAFNyVpiqGo/maxresdefault.jpg",
     "yRJB-LhwVAs": "https://i.ytimg.com/vi/yRJB-LhwVAs/maxresdefault_live.jpg"
   }
 }
