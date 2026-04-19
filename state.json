@@ -203,7 +203,8 @@
     "video:VAFNyVpiqGo": 1776504472,
     "live:yRJB-LhwVAs": 1776533772,
     "video:yRJB-LhwVAs": 1776539229,
-    "live:YY-7HurIIIw": 1776615888
+    "live:YY-7HurIIIw": 1776615888,
+    "video:YY-7HurIIIw": 1776623257
   },
   "msg_ids": {
     "video:mhf3iEC0aDs": 97,
@@ -409,14 +410,15 @@
     "video:VAFNyVpiqGo": 375,
     "live:yRJB-LhwVAs": 377,
     "video:yRJB-LhwVAs": 377,
-    "live:YY-7HurIIIw": 381
+    "live:YY-7HurIIIw": 381,
+    "video:YY-7HurIIIw": 381
   },
   "pinned": {
     "message_id": 381,
     "kind": "live",
     "vid": "YY-7HurIIIw"
   },
-  "last_seen_epoch": 1776620948,
+  "last_seen_epoch": 1776623257,
   "thumbs": {
     "nO8AYyTOi1A": "https://i.ytimg.com/vi/nO8AYyTOi1A/maxresdefault.jpg",
     "rkLVLDqPc40": "https://i.ytimg.com/vi/rkLVLDqPc40/maxresdefault.jpg",
@@ -434,6 +436,6 @@
     "GlSyUbyWaec": "https://i.ytimg.com/vi/GlSyUbyWaec/maxresdefault.jpg",
     "VAFNyVpiqGo": "https://i.ytimg.com/vi/VAFNyVpiqGo/maxresdefault.jpg",
     "yRJB-LhwVAs": "https://i.ytimg.com/vi/yRJB-LhwVAs/maxresdefault.jpg",
-    "YY-7HurIIIw": "https://i.ytimg.com/vi/YY-7HurIIIw/maxresdefault_live.jpg"
+    "YY-7HurIIIw": "https://i.ytimg.com/vi/YY-7HurIIIw/maxresdefault.jpg"
   }
 }
