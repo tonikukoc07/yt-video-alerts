@@ -207,7 +207,8 @@
     "video:YY-7HurIIIw": 1776623257,
     "live:dVJ6HrOwlxo": 1776680459,
     "video:dVJ6HrOwlxo": 1776689680,
-    "live:oqj7WDDUSRQ": 1776696237
+    "live:oqj7WDDUSRQ": 1776696237,
+    "video:oqj7WDDUSRQ": 1776700642
   },
   "msg_ids": {
     "video:mhf3iEC0aDs": 97,
@@ -417,14 +418,15 @@
     "video:YY-7HurIIIw": 381,
     "live:dVJ6HrOwlxo": 383,
     "video:dVJ6HrOwlxo": 383,
-    "live:oqj7WDDUSRQ": 385
+    "live:oqj7WDDUSRQ": 385,
+    "video:oqj7WDDUSRQ": 385
   },
   "pinned": {
     "message_id": 385,
     "kind": "live",
     "vid": "oqj7WDDUSRQ"
   },
-  "last_seen_epoch": 1776696237,
+  "last_seen_epoch": 1776700642,
   "thumbs": {
     "nO8AYyTOi1A": "https://i.ytimg.com/vi/nO8AYyTOi1A/maxresdefault.jpg",
     "rkLVLDqPc40": "https://i.ytimg.com/vi/rkLVLDqPc40/maxresdefault.jpg",
