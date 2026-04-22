@@ -2,8 +2,6 @@ name: YouTube → Telegram Alerts (PRO)
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/5 * * * *"   # cada 5 min (UTC). GitHub puede retrasar, pero suele ir bien.
 
 permissions:
   contents: write   # necesario para commitear state.json
