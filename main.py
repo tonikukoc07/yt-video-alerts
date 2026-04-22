@@ -2,60 +2,39 @@ import os
 import json
 import time
 import requests
+import io
 from datetime import datetime, timezone
 from telegram import Bot, InputMediaPhoto
 from telegram.error import BadRequest
 
 STATE_FILE = "state.json"
 
+# Variables de entorno
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "")
 YT_API_KEY = os.environ.get("YT_API_KEY", "")
-
-SCAN_LIMIT = int(os.environ.get("SCAN_LIMIT", "15"))
 TZ = os.environ.get("TZ", "Europe/Madrid")
-
 PIN_LATEST = os.environ.get("PIN_LATEST", "1") == "1"
-# OJO: NO borramos mensajes aunque esta variable exista:
-DELETE_LIVE_WHEN_FINALIZED = os.environ.get("DELETE_LIVE_WHEN_FINALIZED", "1") == "1"
 BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
-
 
 def must_env(name, value):
     if not value:
         raise RuntimeError(f"Missing env var: {name}")
 
-
 def load_state():
-    if not os.path.exists(STATE_FILE):
-        return {}
-
+    if not os.path.exists(STATE_FILE): return {}
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             st = json.load(f)
-    except Exception:
-        return {}
-
-    # Reparaciones defensivas ante “memoria corrupta”
-    if not isinstance(st, dict):
-        st = {}
-    if not isinstance(st.get("notified"), dict):
-        st["notified"] = {}
-    if not isinstance(st.get("msg_ids"), dict):
-        st["msg_ids"] = {}  # {"live:VID": 123, "video:VID": 456}
-    if not isinstance(st.get("pinned"), dict):
-        st["pinned"] = {}  # {"message_id": 123, "kind": "live|video", "vid": "..."}
-    if not isinstance(st.get("thumbs"), dict):
-        st["thumbs"] = {}  # {"VID": "https://...jpg"}
-
+    except Exception: return {}
+    for key in ["notified", "msg_ids", "pinned", "thumbs"]:
+        if not isinstance(st.get(key), dict): st[key] = {}
     return st
-
 
 def save_state(st):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(st, f, ensure_ascii=False, indent=2)
-
 
 def yt_get(url, params):
     params = dict(params)
@@ -64,363 +43,131 @@ def yt_get(url, params):
     r.raise_for_status()
     return r.json()
 
-
-def yt_search_live_now():
-    # Devuelve el primer directo activo (si existe), si no: None
-    data = yt_get(
-        "https://www.googleapis.com/youtube/v3/search",
-        {
-            "part": "snippet",
-            "channelId": CHANNEL_ID,
-            "eventType": "live",
-            "type": "video",
-            "maxResults": 5,
-            "order": "date",
-        },
-    )
+def get_latest_video_id():
+    """
+    Usa la lista de 'Uploads' del canal (Cuesta 1 punto).
+    Convierte el Channel ID (UC...) en Playlist ID (UU...)
+    """
+    playlist_id = "UU" + CHANNEL_ID[2:]
+    data = yt_get("https://www.googleapis.com/youtube/v3/playlistItems", {
+        "part": "snippet",
+        "playlistId": playlist_id,
+        "maxResults": 1
+    })
     items = data.get("items", [])
-    if not items:
-        return None
-    vid = items[0]["id"]["videoId"]
-    return vid
-
-
-def yt_latest_public_video_id():
-    data = yt_get(
-        "https://www.googleapis.com/youtube/v3/search",
-        {
-            "part": "snippet",
-            "channelId": CHANNEL_ID,
-            "type": "video",
-            "maxResults": 1,
-            "order": "date",
-        },
-    )
-    items = data.get("items", [])
-    if not items:
-        return None
-    return items[0]["id"]["videoId"]
-
+    return items[0]["snippet"]["resourceId"]["videoId"] if items else None
 
 def yt_video_info(video_id):
-    data = yt_get(
-        "https://www.googleapis.com/youtube/v3/videos",
-        {
-            "part": "snippet,statistics,liveStreamingDetails",
-            "id": video_id,
-            "maxResults": 1,
-        },
-    )
-
+    """ Obtiene detalles del vídeo (Cuesta 1 punto) """
+    data = yt_get("https://www.googleapis.com/youtube/v3/videos", {
+        "part": "snippet,statistics,liveStreamingDetails",
+        "id": video_id
+    })
     items = data.get("items", [])
-    if not items:
-        return None
-
+    if not items: return None
     v = items[0]
     snippet = v.get("snippet", {})
-    stats = v.get("statistics", {})
     live = v.get("liveStreamingDetails", {})
+    stats = v.get("statistics", {})
 
-    title = snippet.get("title", "")
+    # URL de imagen con bypass de caché
     thumbs = snippet.get("thumbnails", {}) or {}
-    thumb = (
-        (thumbs.get("maxres") or {}).get("url")
-        or (thumbs.get("high") or {}).get("url")
-        or (thumbs.get("medium") or {}).get("url")
-        or (thumbs.get("default") or {}).get("url")
-    )
-
-    live_flag = (snippet.get("liveBroadcastContent") or "").lower()  # live / none / upcoming
-    is_live_now = (live_flag == "live")
-
-    concurrent = None
-    if "concurrentViewers" in live:
-        try:
-            concurrent = int(live["concurrentViewers"])
-        except Exception:
-            concurrent = None
-
-    view_count = None
-    if "viewCount" in stats:
-        try:
-            view_count = int(stats["viewCount"])
-        except Exception:
-            view_count = None
-
-    published_at = snippet.get("publishedAt")  # ISO
-    actual_start = live.get("actualStartTime")
-    actual_end = live.get("actualEndTime")
+    thumb_url = (thumbs.get("maxres") or thumbs.get("high") or thumbs.get("default", {})).get("url")
+    if thumb_url:
+        thumb_url += f"?t={int(time.time())}"
 
     return {
         "vid": video_id,
-        "title": title,
-        "thumb": thumb,
+        "title": snippet.get("title", ""),
+        "thumb": thumb_url,
         "link": f"https://www.youtube.com/watch?v={video_id}",
-        "is_live_now": is_live_now,
-        "concurrent_viewers": concurrent,
-        "view_count": view_count,
-        "published_at": published_at,
-        "actual_start": actual_start,
-        "actual_end": actual_end,
+        "is_live": snippet.get("liveBroadcastContent") == "live",
+        "viewers": live.get("concurrentViewers"),
+        "views": stats.get("viewCount"),
+        "start": live.get("actualStartTime") or snippet.get("publishedAt")
     }
 
-
 def iso_to_local(iso_str):
-    """
-    Convierte ISO de YouTube (normalmente UTC con 'Z') a hora local según TZ env (por defecto Europe/Madrid).
-    Ej: 2026-02-16T08:22:00Z -> 16/02 09:22 (Madrid en invierno)
-    """
     try:
-        from zoneinfo import ZoneInfo  # Python 3.9+
-        tz = ZoneInfo(TZ or "Europe/Madrid")
-
-        s = (iso_str or "").strip()
-        if not s:
-            return ""
-
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
-
-        dt = datetime.fromisoformat(s)
-
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(TZ)
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
         return dt.astimezone(tz).strftime("%d/%m %H:%M")
-    except Exception:
-        return iso_str
-
+    except: return iso_str
 
 def format_caption(info, kind):
-    # kind: "live" or "video"
-    title = info["title"]
-    link = info["link"]
-
+    title = info["title"].replace("<", "&lt;").replace(">", "&gt;") # Seguridad HTML
     if kind == "live":
-        viewers = info.get("concurrent_viewers")
-        viewers_line = f"👀 {viewers} viewers\n" if viewers is not None else ""
-        when = info.get("actual_start") or info.get("published_at") or ""
-        when_line = f"🕒 {iso_to_local(when)}\n" if when else ""
-        return f"🔴 DIRECTO\n✨ {title}\n{viewers_line}{when_line}👉 {link}".strip()
+        v_line = f"👀 {info['viewers']} viewers\n" if info['viewers'] else ""
+        return f"🔴 <b>DIRECTO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n\n👉 {info['link']}"
+    
+    v_line = f"👀 {info['views']} views\n" if info['views'] else ""
+    return f"🎥 <b>NUEVO VÍDEO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n\n👉 {info['link']}"
 
-    views = info.get("view_count")
-    views_line = f"👀 {views} views\n" if views is not None else ""
-    when = info.get("published_at") or ""
-    when_line = f"🕒 {iso_to_local(when)}\n" if when else ""
-    return f"🎥 NUEVO VÍDEO\n✨ {title}\n{views_line}{when_line}👉 {link}".strip()
-
-
-def send_post(bot: Bot, chat_id: int, info, kind):
-    caption = format_caption(info, kind)
-    thumb = info.get("thumb")
-
-    if thumb:
+def send_post(bot, chat_id, info, kind):
+    cap = format_caption(info, kind)
+    if info['thumb']:
         try:
-            r = requests.get(thumb, timeout=20)
-            r.raise_for_status()
-            msg = bot.send_photo(chat_id=chat_id, photo=r.content, caption=caption)
+            r = requests.get(info['thumb'], timeout=20)
+            msg = bot.send_photo(chat_id=chat_id, photo=r.content, caption=cap, parse_mode="HTML")
             return msg.message_id
-        except Exception:
-            pass
+        except: pass
+    return bot.send_message(chat_id=chat_id, text=cap, parse_mode="HTML").message_id
 
-    msg = bot.send_message(chat_id=chat_id, text=caption, parse_mode=None)
-    return msg.message_id
-
-
-def try_pin(bot: Bot, chat_id: int, message_id: int):
+def update_msg(bot, chat_id, mid, info, kind):
+    cap = format_caption(info, kind)
     try:
-        bot.pin_chat_message(chat_id=chat_id, message_id=message_id, disable_notification=True)
+        # Forzamos cambio de foto al pasar a video
+        r = requests.get(info['thumb'], timeout=20)
+        media = InputMediaPhoto(media=io.BytesIO(r.content), caption=cap, parse_mode="HTML")
+        bot.edit_message_media(chat_id=chat_id, message_id=mid, media=media)
         return True
-    except Exception:
-        return False
-
-
-def try_unpin_all(bot: Bot, chat_id: int):
-    # ✅ Quita TODOS los pins (NO borra mensajes)
-    try:
-        bot.unpin_all_chat_messages(chat_id=chat_id)
-        return True
-    except Exception:
-        return False
-
-
-def try_edit_caption(bot: Bot, chat_id: int, message_id: int, caption: str):
-    try:
-        bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=caption)
-        return True
-    except BadRequest:
-        return False
-    except Exception:
-        return False
-
-
-def try_edit_text(bot: Bot, chat_id: int, message_id: int, text: str):
-    # Por si el post fue texto (no foto)
-    try:
-        bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode=None)
-        return True
-    except BadRequest:
-        return False
-    except Exception:
-        return False
-
-
-def try_edit_media(bot: Bot, chat_id: int, message_id: int, photo_bytes, caption: str):
-    try:
-        media = InputMediaPhoto(media=photo_bytes, caption=caption)
-        bot.edit_message_media(chat_id=chat_id, message_id=message_id, media=media)
-        return True
-    except BadRequest:
-        return False
-    except Exception:
-        return False
-
+    except:
+        try: return bot.edit_message_caption(chat_id=chat_id, message_id=mid, caption=cap, parse_mode="HTML")
+        except: return False
 
 def run_once():
     must_env("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
-    must_env("CHAT_ID", CHAT_ID)
-    must_env("CHANNEL_ID", CHANNEL_ID)
-    must_env("YT_API_KEY", YT_API_KEY)
-
     bot = Bot(token=TELEGRAM_TOKEN)
     chat_id = int(CHAT_ID)
-
     state = load_state()
-    notified = state.setdefault("notified", {})
-    msg_ids = state.setdefault("msg_ids", {})
-    pinned = state.setdefault("pinned", {})
-    thumbs = state.setdefault("thumbs", {})
 
-    # 1) ¿Hay directo activo ahora mismo?
-    live_vid = yt_search_live_now()
+    vid = get_latest_video_id()
+    if not vid: return
+    info = yt_video_info(vid)
+    if not info: return
 
-    # Si BASELINE_ONLY: solo fija baseline y guarda SIN postear.
+    kind = "live" if info["is_live"] else "video"
+    notif_key = f"{kind}:{vid}"
+
+    # Modo Baseline (Silencioso)
     if BASELINE_ONLY:
-        if live_vid:
-            notified[f"live:{live_vid}"] = int(time.time())
-        else:
-            latest_vid = yt_latest_public_video_id()
-            if latest_vid:
-                # IMPORTANTE: marcamos también live: y video: por si venías de líos previos
-                notified[f"video:{latest_vid}"] = int(time.time())
-
-        state["last_seen_epoch"] = int(time.time())
+        state["notified"][notif_key] = int(time.time())
         save_state(state)
-        print("BASELINE_ONLY: state updated (no notifications).")
         return
 
-    # 2) Si hay live → prioridad live
-    if live_vid:
-        info = yt_video_info(live_vid)
-        if not info:
-            print("Live vid found but no info.")
-            return
+    mid = None
+    # 1. ¿Ya se notificó como directo pero ahora es vídeo? -> EDITAR
+    live_mid = state["msg_ids"].get(f"live:{vid}")
+    if live_mid and kind == "video" and f"video:{vid}" not in state["notified"]:
+        if update_msg(bot, chat_id, live_mid, info, "video"):
+            state["notified"][notif_key] = int(time.time())
+            mid = live_mid
 
-        if f"live:{live_vid}" not in notified:
-            mid = send_post(bot, chat_id, info, kind="live")
-            msg_ids[f"live:{live_vid}"] = mid
-            notified[f"live:{live_vid}"] = int(time.time())
-            thumbs[live_vid] = info.get("thumb")
-            print("Notified LIVE:", live_vid, "msg_id", mid)
-        else:
-            mid = msg_ids.get(f"live:{live_vid}")
+    # 2. Notificación normal (Nuevo)
+    elif notif_key not in state["notified"]:
+        mid = send_post(bot, chat_id, info, kind)
+        state["notified"][notif_key] = int(time.time())
+        state["msg_ids"][notif_key] = mid
 
-        # ✅ PIN: desancla todos y ancla SOLO el más reciente
-        if PIN_LATEST and mid:
-            if pinned.get("message_id") != mid:
-                try_unpin_all(bot, chat_id)
-                ok = try_pin(bot, chat_id, mid)
-                if ok:
-                    pinned.update({"message_id": mid, "kind": "live", "vid": live_vid})
-                    print("Pinned LIVE msg_id", mid)
-
-        state["last_seen_epoch"] = int(time.time())
-        save_state(state)
-        print("State saved. last_seen_epoch =", state["last_seen_epoch"])
-        return
-
-    # 3) No hay live → último vídeo público
-    latest_vid = yt_latest_public_video_id()
-    if not latest_vid:
-        print("No latest video found.")
-        return
-
-    info = yt_video_info(latest_vid)
-    if not info:
-        print("Latest vid found but no info.")
-        return
-
-    # ✅ CLAVE ANTI-DUPLICADOS:
-    # Si este vídeo ya fue notificado como LIVE antes (misma VID),
-    # NO publicamos un nuevo mensaje. Editamos el mensaje del live para convertirlo a "NUEVO VÍDEO".
-    live_mid_same_vid = msg_ids.get(f"live:{latest_vid}")
-    if live_mid_same_vid and f"video:{latest_vid}" not in notified:
-        new_cap = format_caption(info, kind="video")
-        old_thumb = thumbs.get(latest_vid)
-        new_thumb = info.get("thumb")
-
-        edited = False
-
-        # Solo al pasar de live a video, si cambió la portada, cambia la foto
-        if old_thumb and new_thumb and old_thumb != new_thumb:
-            try:
-                r = requests.get(new_thumb, timeout=20)
-                r.raise_for_status()
-                edited = try_edit_media(bot, chat_id, live_mid_same_vid, r.content, new_cap)
-            except Exception:
-                edited = False
-
-        # Si no cambió portada o falló media, cambia solo caption/texto
-        if not edited:
-            edited = try_edit_caption(bot, chat_id, live_mid_same_vid, new_cap)
-            if not edited:
-                edited = try_edit_text(bot, chat_id, live_mid_same_vid, new_cap)
-
-        if edited:
-            msg_ids[f"video:{latest_vid}"] = live_mid_same_vid
-            notified[f"video:{latest_vid}"] = int(time.time())
-            thumbs[latest_vid] = new_thumb
-            print("Converted LIVE->VIDEO by editing msg_id", live_mid_same_vid)
-            mid = live_mid_same_vid
-        else:
-            mid = None
-    else:
-        mid = None
-
-    # Flujo normal de vídeo si no hemos convertido por edición
-    if mid is None:
-        if f"video:{latest_vid}" not in notified:
-            mid = send_post(bot, chat_id, info, kind="video")
-            msg_ids[f"video:{latest_vid}"] = mid
-            notified[f"video:{latest_vid}"] = int(time.time())
-            thumbs[latest_vid] = info.get("thumb")
-            print("Notified VIDEO:", latest_vid, "msg_id", mid)
-        else:
-            mid = msg_ids.get(f"video:{latest_vid}")
-            if mid:
-                cap = format_caption(info, kind="video")
-                # Si ya existía el mensaje, intentamos actualizarlo
-                if not try_edit_caption(bot, chat_id, mid, cap):
-                    try_edit_text(bot, chat_id, mid, cap)
-                thumbs[latest_vid] = info.get("thumb")
-
-    # ✅ PIN: desancla todos y ancla SOLO el más reciente (NO borra mensajes)
+    # 3. Pin Logic
     if PIN_LATEST and mid:
-        if pinned.get("message_id") != mid:
-            try_unpin_all(bot, chat_id)
-            ok = try_pin(bot, chat_id, mid)
-            if ok:
-                pinned.update({"message_id": mid, "kind": "video", "vid": latest_vid})
-                print("Pinned VIDEO msg_id", mid)
+        try:
+            bot.unpin_all_chat_messages(chat_id=chat_id)
+            bot.pin_chat_message(chat_id=chat_id, message_id=mid, disable_notification=True)
+        except: pass
 
-    state["last_seen_epoch"] = int(time.time())
     save_state(state)
-    print("State saved. last_seen_epoch =", state["last_seen_epoch"])
-
-
-def main():
-    run_once()
-
 
 if __name__ == "__main__":
-    main()
+    run_once()
