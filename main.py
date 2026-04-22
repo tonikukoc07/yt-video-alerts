@@ -99,10 +99,10 @@ def format_caption(info, kind):
     title = info["title"].replace("<", "&lt;").replace(">", "&gt;") # Seguridad HTML
     if kind == "live":
         v_line = f"👀 {info['viewers']} viewers\n" if info['viewers'] else ""
-        return f"🔴 <b>DIRECTO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n\n👉 {info['link']}"
+        return f"🔴 <b>DIRECTO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n👉 {info['link']}"
     
     v_line = f"👀 {info['views']} views\n" if info['views'] else ""
-    return f"🎥 <b>NUEVO VÍDEO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n\n👉 {info['link']}"
+    return f"🎥 <b>NUEVO VÍDEO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n👉 {info['link']}"
 
 def send_post(bot, chat_id, info, kind):
     cap = format_caption(info, kind)
