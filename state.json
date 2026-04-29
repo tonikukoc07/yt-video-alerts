@@ -441,7 +441,10 @@
     "video:zJ7sJ8NrYcA": 402,
     "live:zJ7sJ8NrYcA": 404,
     "video:ngxkNMMD0pA": 406,
-    "live:ngxkNMMD0pA": 408
+    "live:ngxkNMMD0pA": 408,
+    "CzbwwZFkLSg": 400,
+    "zJ7sJ8NrYcA": 404,
+    "ngxkNMMD0pA": 408
   },
   "pinned": {
     "message_id": 385,
@@ -470,5 +473,9 @@
     "dVJ6HrOwlxo": "https://i.ytimg.com/vi/dVJ6HrOwlxo/maxresdefault.jpg",
     "oqj7WDDUSRQ": "https://i.ytimg.com/vi/oqj7WDDUSRQ/maxresdefault.jpg",
     "QGecm-s2cAQ": "https://i.ytimg.com/vi/QGecm-s2cAQ/maxresdefault.jpg"
+  },
+  "vid_status": {
+    "CzbwwZFkLSg": "video",
+    "zJ7sJ8NrYcA": "video"
   }
 }
