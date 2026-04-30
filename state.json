@@ -444,7 +444,8 @@
     "live:ngxkNMMD0pA": 408,
     "CzbwwZFkLSg": 400,
     "zJ7sJ8NrYcA": 404,
-    "ngxkNMMD0pA": 408
+    "ngxkNMMD0pA": 408,
+    "L_SV8AEwcIg": 410
   },
   "pinned": {
     "message_id": 385,
@@ -477,6 +478,7 @@
   "vid_status": {
     "CzbwwZFkLSg": "video",
     "zJ7sJ8NrYcA": "video",
-    "ngxkNMMD0pA": "video"
+    "ngxkNMMD0pA": "video",
+    "L_SV8AEwcIg": "video"
   }
 }
