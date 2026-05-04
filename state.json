@@ -449,7 +449,8 @@
     "pX9TYqY6j6c": 412,
     "B7LNDHV8EcE": 414,
     "RXESJqa_Wh8": 416,
-    "MOTsyZHkNQQ": 417
+    "MOTsyZHkNQQ": 417,
+    "qCgi8CJIJys": 419
   },
   "pinned": {
     "message_id": 385,
@@ -487,6 +488,7 @@
     "pX9TYqY6j6c": "video",
     "B7LNDHV8EcE": "video",
     "RXESJqa_Wh8": "video",
-    "MOTsyZHkNQQ": "video"
+    "MOTsyZHkNQQ": "video",
+    "qCgi8CJIJys": "live"
   }
 }
