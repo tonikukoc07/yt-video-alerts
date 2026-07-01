@@ -490,7 +490,8 @@
     "j2zv1XUz9tU": 492,
     "0043mGrr5CQ": 494,
     "wnvfQ1P1kZ8": 497,
-    "Y03wIXKJpd4": 498
+    "Y03wIXKJpd4": 498,
+    "dTwurUxF9mE": 499
   },
   "pinned": {
     "message_id": 385,
@@ -569,6 +570,7 @@
     "j2zv1XUz9tU": "video",
     "0043mGrr5CQ": "video",
     "wnvfQ1P1kZ8": "video",
-    "Y03wIXKJpd4": "video"
+    "Y03wIXKJpd4": "video",
+    "dTwurUxF9mE": "live"
   }
 }
