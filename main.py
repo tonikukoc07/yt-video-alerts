@@ -3,6 +3,8 @@ import json
 import time
 import requests
 import io
+import re
+import html
 from datetime import datetime, timezone
 from telegram import Bot, InputMediaPhoto
 from telegram.error import BadRequest
@@ -28,8 +30,8 @@ def load_state():
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             st = json.load(f)
     except Exception: return {}
-    # Aseguramos que existan las claves necesarias
-    for key in ["msg_ids", "vid_status"]:
+    # Aseguramos que existan las claves necesarias, añadimos 'community_posts'
+    for key in ["msg_ids", "vid_status", "community_posts"]:
         if not isinstance(st.get(key), dict): st[key] = {}
     return st
 
@@ -45,10 +47,7 @@ def yt_get(url, params):
     return r.json()
 
 def get_recent_video_ids():
-    """
-    Trae los 3 últimos vídeos de la lista Uploads.
-    Así evitamos olvidarnos de actualizar el vídeo anterior cuando subes uno nuevo.
-    """
+    """Trae los 3 últimos vídeos de la lista Uploads."""
     playlist_id = "UU" + CHANNEL_ID[2:]
     data = yt_get("https://www.googleapis.com/youtube/v3/playlistItems", {
         "part": "snippet",
@@ -85,6 +84,71 @@ def yt_video_info(video_id):
         "views": stats.get("viewCount"),
         "start": live.get("actualStartTime") or snippet.get("publishedAt")
     }
+
+def get_latest_community_post():
+    """
+    Extrae la última publicación (Community Post) rastreando el HTML.
+    La API oficial no lo soporta, así que lo hacemos manualmente.
+    """
+    try:
+        url = f"https://www.youtube.com/channel/{CHANNEL_ID}/community"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept-Language": "es-ES,es;q=0.9"
+        }
+        r = requests.get(url, headers=headers, timeout=20)
+        if r.status_code != 200: return None
+        
+        # Buscamos los datos iniciales que YouTube carga en la web
+        match = re.search(r'var ytInitialData = (\{.*?\});</script>', r.text)
+        if not match: return None
+        
+        data = json.loads(match.group(1))
+        
+        # Función recursiva para buscar el post en el caos del JSON de YouTube
+        def find_key(obj, key):
+            if isinstance(obj, dict):
+                if key in obj: return obj[key]
+                for k, v in obj.items():
+                    res = find_key(v, key)
+                    if res: return res
+            elif isinstance(obj, list):
+                for item in obj:
+                    res = find_key(item, key)
+                    if res: return res
+            return None
+
+        post_renderer = find_key(data, 'backstagePostRenderer')
+        if not post_renderer: return None
+        
+        post_id = post_renderer.get('postId')
+        if not post_id: return None
+        
+        # Extraer el texto de la publicación
+        text_runs = post_renderer.get('contentText', {}).get('runs', [])
+        text = "".join([run.get('text', '') for run in text_runs])
+        
+        # Extraer la imagen (si ha subido alguna)
+        image_url = None
+        attachments = post_renderer.get('backstageAttachment', {})
+        if 'backstageImageRenderer' in attachments:
+            thumbs = attachments['backstageImageRenderer'].get('image', {}).get('thumbnails', [])
+            if thumbs: image_url = thumbs[-1].get('url')
+        elif 'postMultiImageRenderer' in attachments:
+            # Si sube varias imágenes, pillamos la primera
+            images = attachments['postMultiImageRenderer'].get('images', [])
+            if images:
+                thumbs = images[0].get('backstageImageRenderer', {}).get('image', {}).get('thumbnails', [])
+                if thumbs: image_url = thumbs[-1].get('url')
+                
+        return {
+            "id": post_id,
+            "text": text.strip(),
+            "image": image_url,
+            "link": f"https://www.youtube.com/post/{post_id}"
+        }
+    except Exception:
+        return None
 
 def iso_to_local(iso_str):
     try:
@@ -132,56 +196,90 @@ def run_once():
     chat_id = int(CHAT_ID)
     state = load_state()
 
+    # --- PARTE 1: GESTIÓN DE VÍDEOS Y DIRECTOS ---
     vids = get_recent_video_ids()
-    if not vids: return
-    
-    newest_vid = vids[0]
-    vids.reverse() # Procesamos de más antiguo a más nuevo
+    if vids:
+        newest_vid = vids[0]
+        vids.reverse() # Procesamos de más antiguo a más nuevo
 
-    for vid in vids:
-        info = yt_video_info(vid)
-        if not info: continue
+        for vid in vids:
+            info = yt_video_info(vid)
+            if not info: continue
 
-        kind = "live" if info["is_live"] else "video"
+            kind = "live" if info["is_live"] else "video"
 
-        # Buscar si ya publicamos este vídeo (migración de estado antiguo incluida)
-        mid = state["msg_ids"].get(vid)
-        if not mid:
-            mid = state["msg_ids"].get(f"live:{vid}") or state["msg_ids"].get(f"video:{vid}")
-            # Si lo encontramos con el formato antiguo, lo actualizamos al nuevo
-            if mid:
-                state["msg_ids"][vid] = mid
-
-        # Modo silencioso (Baseline)
-        if BASELINE_ONLY:
+            mid = state["msg_ids"].get(vid)
             if not mid:
-                state["msg_ids"][vid] = -1
-                state["vid_status"][vid] = kind
-            continue
+                mid = state["msg_ids"].get(f"live:{vid}") or state["msg_ids"].get(f"video:{vid}")
+                if mid:
+                    state["msg_ids"][vid] = mid
 
-        # CASO 1: VÍDEO NUEVO (Nunca publicado)
-        if not mid:
-            mid = send_post(bot, chat_id, info, kind)
-            state["msg_ids"][vid] = mid
-            state["vid_status"][vid] = kind
-
-            # Si es el vídeo más nuevo, lo fijamos
-            if PIN_LATEST and vid == newest_vid:
-                try:
-                    bot.unpin_all_chat_messages(chat_id=chat_id)
-                    bot.pin_chat_message(chat_id=chat_id, message_id=mid, disable_notification=True)
-                except: pass
-
-        # CASO 2: VÍDEO YA PUBLICADO -> Comprobar si cambió de estado (Live <-> Video)
-        elif mid != -1:
-            old_kind = state["vid_status"].get(vid)
-            if not old_kind:
-                old_kind = "live" if f"live:{vid}" in state.get("msg_ids", {}) else "video"
-
-            # Si el estado cambió, editamos el mensaje en Telegram
-            if old_kind != kind:
-                if update_msg(bot, chat_id, mid, info, kind):
+            if BASELINE_ONLY:
+                if not mid:
+                    state["msg_ids"][vid] = -1
                     state["vid_status"][vid] = kind
+                continue
+
+            if not mid:
+                mid = send_post(bot, chat_id, info, kind)
+                state["msg_ids"][vid] = mid
+                state["vid_status"][vid] = kind
+
+                if PIN_LATEST and vid == newest_vid:
+                    try:
+                        bot.unpin_all_chat_messages(chat_id=chat_id)
+                        bot.pin_chat_message(chat_id=chat_id, message_id=mid, disable_notification=True)
+                    except: pass
+
+            elif mid != -1:
+                old_kind = state["vid_status"].get(vid)
+                if not old_kind:
+                    old_kind = "live" if f"live:{vid}" in state.get("msg_ids", {}) else "video"
+
+                if old_kind != kind:
+                    if update_msg(bot, chat_id, mid, info, kind):
+                        state["vid_status"][vid] = kind
+
+    # --- PARTE 2: GESTIÓN DE PUBLICACIONES (COMMUNITY) ---
+    post = get_latest_community_post()
+    if post:
+        post_id = post["id"]
+        if BASELINE_ONLY:
+            if post_id not in state.get("community_posts", {}):
+                state["community_posts"][post_id] = -1
+        else:
+            if post_id not in state.get("community_posts", {}):
+                safe_text = html.escape(post['text'])
+                
+                # Limitamos el texto porque Telegram no deja poner descripciones gigantes en las fotos
+                if len(safe_text) > 850:
+                    safe_text = safe_text[:850] + " [...]"
+                
+                if safe_text:
+                    cap = f"💬 <b>NUEVA PUBLICACIÓN</b>\n\n{safe_text}\n\n👉 {post['link']}"
+                else:
+                    cap = f"💬 <b>NUEVA PUBLICACIÓN</b>\n\n👉 {post['link']}"
+                
+                mid = None
+                
+                # Si tiene foto, intentamos mandar el mensaje con foto
+                if post['image']:
+                    try:
+                        r = requests.get(post['image'], timeout=20)
+                        msg = bot.send_photo(chat_id=chat_id, photo=r.content, caption=cap, parse_mode="HTML")
+                        mid = msg.message_id
+                    except: pass
+                
+                # Si falló la foto o no tenía, lo mandamos solo como texto
+                if not mid:
+                    try:
+                        msg = bot.send_message(chat_id=chat_id, text=cap, parse_mode="HTML")
+                        mid = msg.message_id
+                    except: pass
+                
+                # Guardamos para no repetir
+                if mid:
+                    state["community_posts"][post_id] = mid
 
     save_state(state)
 
