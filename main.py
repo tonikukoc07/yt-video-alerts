@@ -30,7 +30,6 @@ def load_state():
             st = json.load(f)
     except Exception: return {}
     
-    # Separamos la memoria: msg_ids (vídeos), msg_ids_posts (comunidad)
     for key in ["msg_ids", "msg_ids_posts", "vid_status"]:
         if not isinstance(st.get(key), dict): st[key] = {}
     return st
@@ -65,7 +64,6 @@ def get_recent_community_posts(channel_id):
     try:
         r = requests.get(url, headers=headers, timeout=20)
         
-        # Buscar los datos iniciales usando varios patrones por si YouTube cambia el formato
         data = None
         for pattern in [r'var ytInitialData\s*=\s*({.*?});', r'window\["ytInitialData"\]\s*=\s*({.*?});', r'ytInitialData\s*=\s*({.*?});(?:</script>|\n)']:
             match = re.search(pattern, r.text)
@@ -77,34 +75,61 @@ def get_recent_community_posts(channel_id):
             print("No se encontró la base de datos interna de YouTube.")
             return []
 
-        # Función mágica recursiva: Busca las publicaciones en cualquier parte del archivo
-        def extract_posts(obj):
-            found = []
-            if isinstance(obj, dict):
-                if "backstagePostThreadRenderer" in obj:
-                    found.append(obj["backstagePostThreadRenderer"])
-                for k, v in obj.items():
-                    found.extend(extract_posts(v))
-            elif isinstance(obj, list):
-                for item in obj:
-                    found.extend(extract_posts(item))
-            return found
-
-        raw_posts = extract_posts(data)
-        posts = []
+        raw_posts = []
         
-        # Procesamos solo las 3 primeras que encuentre
-        for item in raw_posts[:3]:
+        # 1. Intentar ruta limpia estructurada (mantiene orden cronológico perfecto)
+        try:
+            tabs = data.get("contents", {}).get("twoColumnBrowseResultsRenderer", {}).get("tabs", [])
+            for tab in tabs:
+                tr = tab.get("tabRenderer", {})
+                canonical = tr.get("endpoint", {}).get("browseEndpoint", {}).get("canonicalBaseUrl", "").lower()
+                if "community" in canonical or tr.get("selected"):
+                    s_contents = tr.get("content", {}).get("sectionListRenderer", {}).get("contents", [])
+                    for sc in s_contents:
+                        if "itemSectionRenderer" in sc:
+                            items = sc.get("itemSectionRenderer", {}).get("contents", [])
+                            for item in items:
+                                if "backstagePostThreadRenderer" in item:
+                                    raw_posts.append(item["backstagePostThreadRenderer"])
+                    if raw_posts:
+                        break
+        except Exception as e:
+            print(f"Error en ruta estructurada: {e}")
+
+        # 2. Si la ruta limpia falla, usar rastreador recursivo como salvavidas
+        if not raw_posts:
+            def extract_posts(obj):
+                found = []
+                if isinstance(obj, dict):
+                    if "backstagePostThreadRenderer" in obj:
+                        found.append(obj["backstagePostThreadRenderer"])
+                    for k, v in obj.items():
+                        found.extend(extract_posts(v))
+                elif isinstance(obj, list):
+                    for item in obj:
+                        found.extend(extract_posts(item))
+                return found
+
+            seen = set()
+            for p in extract_posts(data):
+                try:
+                    pid = p["post"]["backstagePostRenderer"]["postId"]
+                    if pid not in seen:
+                        seen.add(pid)
+                        raw_posts.append(p)
+                except:
+                    pass
+
+        posts = []
+        for item in raw_posts:
             try:
                 post_renderer = item["post"]["backstagePostRenderer"]
                 post_id = post_renderer["postId"]
                 
-                # Extraer texto
                 text = ""
                 if "contentText" in post_renderer and "runs" in post_renderer["contentText"]:
                     text = "".join([run.get("text", "") for run in post_renderer["contentText"]["runs"]])
                 
-                # Extraer imagen si la tiene
                 thumb_url = None
                 attachment = post_renderer.get("backstageAttachment", {})
                 if "backstageImageRenderer" in attachment:
@@ -175,7 +200,6 @@ def format_caption(info, kind):
     title = info["title"].replace("<", "&lt;").replace(">", "&gt;")
     
     if kind == "post":
-        # Evitar límites de texto de Telegram (1024 caracteres para fotos, 4096 sin foto)
         max_len = 900 if info.get('thumb') else 4000
         if len(title) > max_len:
             title = title[:max_len] + "..."
@@ -260,18 +284,18 @@ def run_once():
     # ========================================
     posts = get_recent_community_posts(CHANNEL_ID)
     if posts:
-        posts.reverse() # Procesar de más antiguo a más nuevo
-        for post in posts:
-            post_id = post["vid"]
-            
-            if BASELINE_ONLY:
-                if post_id not in state["msg_ids_posts"]:
-                    state["msg_ids_posts"][post_id] = -1
-                continue
-                
-            # Si el post no está en la memoria, lo publicamos
+        # ATENCIÓN: Solo evaluamos la publicación número 0 (la más nueva del canal)
+        latest_post = posts[0]
+        post_id = latest_post["vid"]
+        
+        if BASELINE_ONLY:
             if post_id not in state["msg_ids_posts"]:
-                mid = send_post(bot, chat_id, post, "post")
+                state["msg_ids_posts"][post_id] = -1
+        else:
+            # Si el post más reciente no está en la memoria de state.json, se publica.
+            # Cualquier post anterior o intermedio es completamente ignorado.
+            if post_id not in state["msg_ids_posts"]:
+                mid = send_post(bot, chat_id, latest_post, "post")
                 state["msg_ids_posts"][post_id] = mid
 
     save_state(state)
