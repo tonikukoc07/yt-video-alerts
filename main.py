@@ -57,63 +57,81 @@ def get_recent_video_ids():
     return [item["snippet"]["resourceId"]["videoId"] for item in items]
 
 def get_recent_community_posts(channel_id):
-    # Usamos la URL oficial con el ID del canal para evitar fallos
     url = f"https://www.youtube.com/channel/{channel_id}/community"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
         "Accept-Language": "es-ES,es;q=0.9"
     }
     try:
         r = requests.get(url, headers=headers, timeout=20)
-        match = re.search(r'ytInitialData\s*=\s*({.*?});(?:</script>|\n)', r.text)
-        if not match:
-            return []
-            
-        data = json.loads(match.group(1))
-        tabs = data.get("contents", {}).get("twoColumnBrowseResultsRenderer", {}).get("tabs", [])
         
-        for tab in tabs:
-            tab_title = tab.get("tabRenderer", {}).get("title", "").lower()
-            if tab_title in ["comunidad", "community"]:
-                contents = tab["tabRenderer"].get("content", {}).get("sectionListRenderer", {}).get("contents", [])
-                if not contents: continue
-                items = contents[0].get("itemSectionRenderer", {}).get("contents", [])
+        # Buscar los datos iniciales usando varios patrones por si YouTube cambia el formato
+        data = None
+        for pattern in [r'var ytInitialData\s*=\s*({.*?});', r'window\["ytInitialData"\]\s*=\s*({.*?});', r'ytInitialData\s*=\s*({.*?});(?:</script>|\n)']:
+            match = re.search(pattern, r.text)
+            if match:
+                data = json.loads(match.group(1))
+                break
                 
-                posts = []
-                for item in items[:3]: # Solo procesamos las 3 más recientes
-                    if "backstagePostThreadRenderer" in item:
-                        post_renderer = item["backstagePostThreadRenderer"]["post"]["backstagePostRenderer"]
-                        post_id = post_renderer["postId"]
-                        
-                        # Extraer texto
-                        runs = post_renderer.get("contentText", {}).get("runs", [])
-                        text = "".join([run.get("text", "") for run in runs])
-                        
-                        # Extraer imagen si la tiene
-                        thumb_url = None
-                        attachment = post_renderer.get("backstageAttachment", {})
-                        if "backstageImageRenderer" in attachment:
-                            thumbnails = attachment["backstageImageRenderer"].get("image", {}).get("thumbnails", [])
-                            if thumbnails: thumb_url = thumbnails[-1]["url"]
-                        elif "postMultiImageRenderer" in attachment:
-                            images = attachment["postMultiImageRenderer"].get("images", [])
-                            if images:
-                                thumbnails = images[0].get("backstageImageRenderer", {}).get("image", {}).get("thumbnails", [])
-                                if thumbnails: thumb_url = thumbnails[-1]["url"]
-                                    
-                        posts.append({
-                            "vid": post_id,
-                            "title": text,
-                            "thumb": thumb_url,
-                            "link": f"https://www.youtube.com/post/{post_id}",
-                            "is_live": False,
-                            "viewers": None,
-                            "views": None,
-                            "start": None
-                        })
-                return posts
+        if not data:
+            print("No se encontró la base de datos interna de YouTube.")
+            return []
+
+        # Función mágica recursiva: Busca las publicaciones en cualquier parte del archivo
+        def extract_posts(obj):
+            found = []
+            if isinstance(obj, dict):
+                if "backstagePostThreadRenderer" in obj:
+                    found.append(obj["backstagePostThreadRenderer"])
+                for k, v in obj.items():
+                    found.extend(extract_posts(v))
+            elif isinstance(obj, list):
+                for item in obj:
+                    found.extend(extract_posts(item))
+            return found
+
+        raw_posts = extract_posts(data)
+        posts = []
+        
+        # Procesamos solo las 3 primeras que encuentre
+        for item in raw_posts[:3]:
+            try:
+                post_renderer = item["post"]["backstagePostRenderer"]
+                post_id = post_renderer["postId"]
+                
+                # Extraer texto
+                text = ""
+                if "contentText" in post_renderer and "runs" in post_renderer["contentText"]:
+                    text = "".join([run.get("text", "") for run in post_renderer["contentText"]["runs"]])
+                
+                # Extraer imagen si la tiene
+                thumb_url = None
+                attachment = post_renderer.get("backstageAttachment", {})
+                if "backstageImageRenderer" in attachment:
+                    thumbnails = attachment["backstageImageRenderer"].get("image", {}).get("thumbnails", [])
+                    if thumbnails: thumb_url = thumbnails[-1]["url"]
+                elif "postMultiImageRenderer" in attachment:
+                    images = attachment["postMultiImageRenderer"].get("images", [])
+                    if images:
+                        thumbnails = images[0].get("backstageImageRenderer", {}).get("image", {}).get("thumbnails", [])
+                        if thumbnails: thumb_url = thumbnails[-1]["url"]
+                            
+                posts.append({
+                    "vid": post_id,
+                    "title": text or "Publicación sin texto",
+                    "thumb": thumb_url,
+                    "link": f"https://www.youtube.com/post/{post_id}",
+                    "is_live": False,
+                    "viewers": None,
+                    "views": None,
+                    "start": None
+                })
+            except Exception as e:
+                print(f"Error extrayendo datos de un post: {e}")
+                
+        return posts
     except Exception as e:
-        print(f"Error extrayendo posts: {e}")
+        print(f"Error de conexión al canal: {e}")
     return []
 
 def yt_video_info(video_id):
