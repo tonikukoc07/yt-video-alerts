@@ -29,8 +29,9 @@ def load_state():
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             st = json.load(f)
     except Exception: return {}
-    # Aseguramos que existan las claves necesarias
-    for key in ["msg_ids", "vid_status"]:
+    
+    # Separamos la memoria: msg_ids (vídeos), msg_ids_posts (comunidad)
+    for key in ["msg_ids", "msg_ids_posts", "vid_status"]:
         if not isinstance(st.get(key), dict): st[key] = {}
     return st
 
@@ -46,10 +47,6 @@ def yt_get(url, params):
     return r.json()
 
 def get_recent_video_ids():
-    """
-    Trae los 3 últimos vídeos de la lista Uploads.
-    Así evitamos olvidarnos de actualizar el vídeo anterior cuando subes uno nuevo.
-    """
     playlist_id = "UU" + CHANNEL_ID[2:]
     data = yt_get("https://www.googleapis.com/youtube/v3/playlistItems", {
         "part": "snippet",
@@ -60,59 +57,49 @@ def get_recent_video_ids():
     return [item["snippet"]["resourceId"]["videoId"] for item in items]
 
 def get_recent_community_posts(channel_id):
-    """
-    Trae las últimas publicaciones de la pestaña comunidad mediante web scraping.
-    YouTube Data API no soporta leer publicaciones de la comunidad.
-    """
+    # Usamos la URL oficial con el ID del canal para evitar fallos
     url = f"https://www.youtube.com/channel/{channel_id}/community"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept-Language": "es-ES,es;q=0.9"
     }
     try:
         r = requests.get(url, headers=headers, timeout=20)
-        r.raise_for_status()
-        
-        # Buscar el JSON inicial incrustado en el HTML
         match = re.search(r'ytInitialData\s*=\s*({.*?});(?:</script>|\n)', r.text)
         if not match:
             return []
             
         data = json.loads(match.group(1))
-        
         tabs = data.get("contents", {}).get("twoColumnBrowseResultsRenderer", {}).get("tabs", [])
+        
         for tab in tabs:
             tab_title = tab.get("tabRenderer", {}).get("title", "").lower()
             if tab_title in ["comunidad", "community"]:
                 contents = tab["tabRenderer"].get("content", {}).get("sectionListRenderer", {}).get("contents", [])
-                if not contents:
-                    continue
+                if not contents: continue
                 items = contents[0].get("itemSectionRenderer", {}).get("contents", [])
                 
                 posts = []
-                # Traemos los 3 últimos posts
-                for item in items[:3]:
+                for item in items[:3]: # Solo procesamos las 3 más recientes
                     if "backstagePostThreadRenderer" in item:
                         post_renderer = item["backstagePostThreadRenderer"]["post"]["backstagePostRenderer"]
                         post_id = post_renderer["postId"]
                         
-                        # Extraer texto del post
+                        # Extraer texto
                         runs = post_renderer.get("contentText", {}).get("runs", [])
                         text = "".join([run.get("text", "") for run in runs])
                         
-                        # Extraer imagen (si la hay)
+                        # Extraer imagen si la tiene
                         thumb_url = None
                         attachment = post_renderer.get("backstageAttachment", {})
                         if "backstageImageRenderer" in attachment:
                             thumbnails = attachment["backstageImageRenderer"].get("image", {}).get("thumbnails", [])
-                            if thumbnails:
-                                thumb_url = thumbnails[-1]["url"] # La de mayor calidad
+                            if thumbnails: thumb_url = thumbnails[-1]["url"]
                         elif "postMultiImageRenderer" in attachment:
                             images = attachment["postMultiImageRenderer"].get("images", [])
                             if images:
                                 thumbnails = images[0].get("backstageImageRenderer", {}).get("image", {}).get("thumbnails", [])
-                                if thumbnails:
-                                    thumb_url = thumbnails[-1]["url"]
+                                if thumbnails: thumb_url = thumbnails[-1]["url"]
                                     
                         posts.append({
                             "vid": post_id,
@@ -122,12 +109,11 @@ def get_recent_community_posts(channel_id):
                             "is_live": False,
                             "viewers": None,
                             "views": None,
-                            "start": None, 
-                            "kind": "post"
+                            "start": None
                         })
                 return posts
     except Exception as e:
-        print(f"Error extrayendo publicaciones: {e}")
+        print(f"Error extrayendo posts: {e}")
     return []
 
 def yt_video_info(video_id):
@@ -168,14 +154,15 @@ def iso_to_local(iso_str):
     except: return iso_str
 
 def format_caption(info, kind):
-    if kind == "post":
-        text = info["title"].replace("<", "&lt;").replace(">", "&gt;")
-        # Acortamos el texto si es muy largo para evitar límites de Telegram
-        if len(text) > 900:
-            text = text[:900] + "..."
-        return f"💬 <b>NUEVA PUBLICACIÓN</b>\n\n{text}\n\n👉 {info['link']}"
-
     title = info["title"].replace("<", "&lt;").replace(">", "&gt;")
+    
+    if kind == "post":
+        # Evitar límites de texto de Telegram (1024 caracteres para fotos, 4096 sin foto)
+        max_len = 900 if info.get('thumb') else 4000
+        if len(title) > max_len:
+            title = title[:max_len] + "..."
+        return f"💬 <b>NUEVA PUBLICACIÓN</b>\n\n{title}\n\n👉 {info['link']}"
+
     if kind == "live":
         v_line = f"👀 {info['viewers']} viewers\n" if info['viewers'] else ""
         return f"🔴 <b>DIRECTO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n👉 {info['link']}"
@@ -212,69 +199,62 @@ def run_once():
     chat_id = int(CHAT_ID)
     state = load_state()
 
-    items_to_process = []
-
-    # 1. Traer Vídeos
+    # ========================================
+    # 1. PROCESAR VÍDEOS / DIRECTOS
+    # ========================================
     vids = get_recent_video_ids()
     newest_vid = vids[0] if vids else None
     if vids:
-        vids.reverse() # Procesamos de más antiguo a más nuevo
+        vids.reverse() 
         for vid in vids:
             info = yt_video_info(vid)
-            if info:
-                info["kind"] = "live" if info["is_live"] else "video"
-                items_to_process.append(info)
+            if not info: continue
 
-    # 2. Traer Publicaciones de Comunidad
+            kind = "live" if info["is_live"] else "video"
+            mid = state["msg_ids"].get(vid)
+            if not mid: mid = state["msg_ids"].get(f"live:{vid}") or state["msg_ids"].get(f"video:{vid}")
+            
+            if BASELINE_ONLY:
+                if not mid:
+                    state["msg_ids"][vid] = -1
+                    state["vid_status"][vid] = kind
+                continue
+
+            if not mid:
+                mid = send_post(bot, chat_id, info, kind)
+                state["msg_ids"][vid] = mid
+                state["vid_status"][vid] = kind
+
+                if PIN_LATEST and vid == newest_vid:
+                    try:
+                        bot.unpin_all_chat_messages(chat_id=chat_id)
+                        bot.pin_chat_message(chat_id=chat_id, message_id=mid, disable_notification=True)
+                    except: pass
+            elif mid != -1:
+                old_kind = state["vid_status"].get(vid)
+                if not old_kind: old_kind = "live" if f"live:{vid}" in state.get("msg_ids", {}) else "video"
+                if old_kind != kind:
+                    if update_msg(bot, chat_id, mid, info, kind):
+                        state["vid_status"][vid] = kind
+
+    # ========================================
+    # 2. PROCESAR PUBLICACIONES (COMUNIDAD)
+    # ========================================
     posts = get_recent_community_posts(CHANNEL_ID)
     if posts:
-        posts.reverse() # De más antigua a más nueva
-        items_to_process.extend(posts)
-
-    if not items_to_process: return
-
-    for info in items_to_process:
-        vid = info["vid"]
-        kind = info["kind"]
-
-        # Buscar si ya publicamos este vídeo/post (migración de estado antiguo incluida)
-        mid = state["msg_ids"].get(vid)
-        if not mid:
-            mid = state["msg_ids"].get(f"live:{vid}") or state["msg_ids"].get(f"video:{vid}")
-            # Si lo encontramos con el formato antiguo, lo actualizamos al nuevo
-            if mid:
-                state["msg_ids"][vid] = mid
-
-        # Modo silencioso (Baseline)
-        if BASELINE_ONLY:
-            if not mid:
-                state["msg_ids"][vid] = -1
-                state["vid_status"][vid] = kind
-            continue
-
-        # CASO 1: ITEM NUEVO (Nunca publicado)
-        if not mid:
-            mid = send_post(bot, chat_id, info, kind)
-            state["msg_ids"][vid] = mid
-            state["vid_status"][vid] = kind
-
-            # Si es el VÍDEO más nuevo, lo fijamos (evitamos fijar un post por defecto, solo vídeos)
-            if PIN_LATEST and vid == newest_vid:
-                try:
-                    bot.unpin_all_chat_messages(chat_id=chat_id)
-                    bot.pin_chat_message(chat_id=chat_id, message_id=mid, disable_notification=True)
-                except: pass
-
-        # CASO 2: ITEM YA PUBLICADO -> Comprobar si cambió de estado (Live <-> Video)
-        elif mid != -1:
-            old_kind = state["vid_status"].get(vid)
-            if not old_kind:
-                old_kind = "live" if f"live:{vid}" in state.get("msg_ids", {}) else "video"
-
-            # Si el estado cambió, editamos el mensaje en Telegram (Las publicaciones "post" no entran aquí)
-            if old_kind != kind:
-                if update_msg(bot, chat_id, mid, info, kind):
-                    state["vid_status"][vid] = kind
+        posts.reverse() # Procesar de más antiguo a más nuevo
+        for post in posts:
+            post_id = post["vid"]
+            
+            if BASELINE_ONLY:
+                if post_id not in state["msg_ids_posts"]:
+                    state["msg_ids_posts"][post_id] = -1
+                continue
+                
+            # Si el post no está en la memoria, lo publicamos
+            if post_id not in state["msg_ids_posts"]:
+                mid = send_post(bot, chat_id, post, "post")
+                state["msg_ids_posts"][post_id] = mid
 
     save_state(state)
 
