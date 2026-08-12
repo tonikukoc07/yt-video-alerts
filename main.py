@@ -19,6 +19,10 @@ TZ = os.environ.get("TZ", "Europe/Madrid")
 PIN_LATEST = os.environ.get("PIN_LATEST", "1") == "1"
 BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
 
+# ID de la pestaña/tema de Telegram (p. ej. 5621)
+MESSAGE_THREAD_ID = os.environ.get("MESSAGE_THREAD_ID", "")
+THREAD_ID = int(MESSAGE_THREAD_ID) if MESSAGE_THREAD_ID and MESSAGE_THREAD_ID.isdigit() else None
+
 def must_env(name, value):
     if not value:
         raise RuntimeError(f"Missing env var: {name}")
@@ -77,7 +81,6 @@ def get_recent_community_posts(channel_id):
 
         raw_posts = []
         
-        # 1. Intentar ruta limpia estructurada (mantiene orden cronológico perfecto)
         try:
             tabs = data.get("contents", {}).get("twoColumnBrowseResultsRenderer", {}).get("tabs", [])
             for tab in tabs:
@@ -96,7 +99,6 @@ def get_recent_community_posts(channel_id):
         except Exception as e:
             print(f"Error en ruta estructurada: {e}")
 
-        # 2. Si la ruta limpia falla, usar rastreador recursivo como salvavidas
         if not raw_posts:
             def extract_posts(obj):
                 found = []
@@ -212,15 +214,21 @@ def format_caption(info, kind):
     v_line = f"👀 {info['views']} views\n" if info['views'] else ""
     return f"🎥 <b>NUEVO VÍDEO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n👉 {info['link']}"
 
-def send_post(bot, chat_id, info, kind):
+def send_post(bot, chat_id, info, kind, thread_id=None):
     cap = format_caption(info, kind)
+    kwargs = {"parse_mode": "HTML"}
+    if thread_id is not None:
+        kwargs["message_thread_id"] = thread_id
+
     if info.get('thumb'):
         try:
             r = requests.get(info['thumb'], timeout=20)
-            msg = bot.send_photo(chat_id=chat_id, photo=r.content, caption=cap, parse_mode="HTML")
+            msg = bot.send_photo(chat_id=chat_id, photo=r.content, caption=cap, **kwargs)
             return msg.message_id
-        except: pass
-    return bot.send_message(chat_id=chat_id, text=cap, parse_mode="HTML").message_id
+        except Exception as e:
+            print(f"Error enviando foto: {e}")
+            pass
+    return bot.send_message(chat_id=chat_id, text=cap, **kwargs).message_id
 
 def update_msg(bot, chat_id, mid, info, kind):
     cap = format_caption(info, kind)
@@ -237,8 +245,14 @@ def update_msg(bot, chat_id, mid, info, kind):
 
 def run_once():
     must_env("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
+    must_env("CHAT_ID", CHAT_ID)
     bot = Bot(token=TELEGRAM_TOKEN)
-    chat_id = int(CHAT_ID)
+    
+    try:
+        chat_id = int(CHAT_ID)
+    except ValueError:
+        chat_id = CHAT_ID
+
     state = load_state()
 
     # ========================================
@@ -263,15 +277,20 @@ def run_once():
                 continue
 
             if not mid:
-                mid = send_post(bot, chat_id, info, kind)
+                mid = send_post(bot, chat_id, info, kind, thread_id=THREAD_ID)
                 state["msg_ids"][vid] = mid
                 state["vid_status"][vid] = kind
 
                 if PIN_LATEST and vid == newest_vid:
                     try:
-                        bot.unpin_all_chat_messages(chat_id=chat_id)
+                        if THREAD_ID is not None:
+                            bot.unpin_all_chat_messages(chat_id=chat_id, message_thread_id=THREAD_ID)
+                        else:
+                            bot.unpin_all_chat_messages(chat_id=chat_id)
                         bot.pin_chat_message(chat_id=chat_id, message_id=mid, disable_notification=True)
-                    except: pass
+                    except Exception as e:
+                        print(f"Error fijando mensaje: {e}")
+                        pass
             elif mid != -1:
                 old_kind = state["vid_status"].get(vid)
                 if not old_kind: old_kind = "live" if f"live:{vid}" in state.get("msg_ids", {}) else "video"
@@ -284,7 +303,6 @@ def run_once():
     # ========================================
     posts = get_recent_community_posts(CHANNEL_ID)
     if posts:
-        # ATENCIÓN: Solo evaluamos la publicación número 0 (la más nueva del canal)
         latest_post = posts[0]
         post_id = latest_post["vid"]
         
@@ -292,10 +310,8 @@ def run_once():
             if post_id not in state["msg_ids_posts"]:
                 state["msg_ids_posts"][post_id] = -1
         else:
-            # Si el post más reciente no está en la memoria de state.json, se publica.
-            # Cualquier post anterior o intermedio es completamente ignorado.
             if post_id not in state["msg_ids_posts"]:
-                mid = send_post(bot, chat_id, latest_post, "post")
+                mid = send_post(bot, chat_id, latest_post, "post", thread_id=THREAD_ID)
                 state["msg_ids_posts"][post_id] = mid
 
     save_state(state)
