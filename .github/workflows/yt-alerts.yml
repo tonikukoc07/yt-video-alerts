@@ -31,6 +31,7 @@ jobs:
           CHAT_ID_GROUP: ${{ secrets.CHAT_ID_GROUP }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           YT_API_KEY: ${{ secrets.YT_API_KEY }}
+          WELCOME_THREAD_ID: ${{ secrets.WELCOME_THREAD_ID }}
           SCAN_LIMIT: "15"
           TZ: "Europe/Madrid"
           PIN_LATEST: "1"
