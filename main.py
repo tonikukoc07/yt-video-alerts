@@ -13,7 +13,7 @@ STATE_FILE = "state.json"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID_CHANNEL_RAW = os.environ.get("CHAT_ID_CHANNEL", os.environ.get("CHAT_ID", ""))
 CHAT_ID_GROUP_RAW = os.environ.get("CHAT_ID_GROUP", "")
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "") # ID de YouTube Canal Principal (UC6efY3r4Oiy0ns4ZEAVw4_A)
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "") # ID de YouTube Canal Principal
 
 # Variables de entorno - CANAL SECUNDARIO (DIRECTOS)
 CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO", "") # UCK4h49E7Bol5DD-szyOgFgQ
@@ -55,11 +55,16 @@ def parse_target(raw_str, key_name):
     return {"chat_id": chat_id, "thread_id": thread_id, "key": key_name}
 
 def load_state():
-    if not os.path.exists(STATE_FILE): return {}
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            st = json.load(f)
-    except Exception: return {}
+    st = {}
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                st = json.load(f)
+        except Exception:
+            st = {}
+            
+    if not isinstance(st, dict):
+        st = {}
     
     for key in ["msg_ids", "msg_ids_posts", "vid_status", "pending_users", "pending_welcomes"]:
         if not isinstance(st.get(key), dict): st[key] = {}
@@ -249,7 +254,7 @@ def get_recent_video_ids(channel_id):
     if not channel_id: return []
     vids = []
 
-    # 1. RSS Feed (Detecta directos al instante sin cuota de API)
+    # 1. RSS Feed
     try:
         rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
         r = requests.get(rss_url, timeout=15)
