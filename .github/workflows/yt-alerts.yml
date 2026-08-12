@@ -25,12 +25,12 @@ jobs:
           pip install requests python-telegram-bot==13.15
 
       - name: Run bot
-        env:
+env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID_CHANNEL: ${{ secrets.CHAT_ID_CHANNEL }}
           CHAT_ID_GROUP: ${{ secrets.CHAT_ID_GROUP }}
-          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          CHAT_ID_CHANNEL: ${{ secrets.CHAT_ID_CHANNEL }}
           YT_API_KEY: ${{ secrets.YT_API_KEY }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           WELCOME_THREAD_ID: ${{ secrets.WELCOME_THREAD_ID }}
           CHANNEL_ID_DIRECTO: ${{ secrets.CHANNEL_ID_DIRECTO }}
           CHAT_ID_GROUP_DIRECTO: ${{ secrets.CHAT_ID_GROUP_DIRECTO }}
