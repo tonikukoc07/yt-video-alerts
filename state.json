@@ -36,6 +36,15 @@
     "2TqXZv0jc8A": "video"
   },
   "pending_users": {},
-  "pending_welcomes": {},
-  "last_update_id": 808919103
+  "pending_welcomes": {
+    "5910": {
+      "msg_id": 5910,
+      "sent_at": 1786549551
+    },
+    "5911": {
+      "msg_id": 5911,
+      "sent_at": 1786549551
+    }
+  },
+  "last_update_id": 808919106
 }
