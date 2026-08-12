@@ -11,9 +11,8 @@ STATE_FILE = "state.json"
 
 # Variables de entorno
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT_ID_CHANNEL = os.environ.get("CHAT_ID_CHANNEL", os.environ.get("CHAT_ID", "")) # Canal
-CHAT_ID_GROUP = os.environ.get("CHAT_ID_GROUP", "")                                 # Grupo
-MESSAGE_THREAD_ID = os.environ.get("MESSAGE_THREAD_ID", "")                         # Pestaña (5621)
+CHAT_ID_CHANNEL_RAW = os.environ.get("CHAT_ID_CHANNEL", os.environ.get("CHAT_ID", ""))
+CHAT_ID_GROUP_RAW = os.environ.get("CHAT_ID_GROUP", "")
 
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "") # ID de YouTube
 YT_API_KEY = os.environ.get("YT_API_KEY", "")
@@ -21,11 +20,29 @@ TZ = os.environ.get("TZ", "Europe/Madrid")
 PIN_LATEST = os.environ.get("PIN_LATEST", "1") == "1"
 BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
 
-THREAD_ID = int(MESSAGE_THREAD_ID) if MESSAGE_THREAD_ID and MESSAGE_THREAD_ID.isdigit() else None
-
 def must_env(name, value):
     if not value:
         raise RuntimeError(f"Missing env var: {name}")
+
+def parse_target(raw_str, key_name):
+    if not raw_str:
+        return None
+    thread_id = None
+    clean_str = raw_str.strip()
+    
+    # Extraer ID de la pestaña si viene en formato -100xxx_5621
+    if "_" in clean_str:
+        parts = clean_str.split("_")
+        clean_str = parts[0]
+        if parts[1].isdigit():
+            thread_id = int(parts[1])
+            
+    try:
+        chat_id = int(clean_str)
+    except ValueError:
+        chat_id = clean_str
+        
+    return {"chat_id": chat_id, "thread_id": thread_id, "key": key_name}
 
 def load_state():
     if not os.path.exists(STATE_FILE): return {}
@@ -245,12 +262,12 @@ def run_once():
     must_env("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
     bot = Bot(token=TELEGRAM_TOKEN)
 
-    # Construir la lista de destinos
     targets = []
-    if CHAT_ID_CHANNEL:
-        targets.append({"chat_id": CHAT_ID_CHANNEL, "thread_id": None, "key": "channel"})
-    if CHAT_ID_GROUP:
-        targets.append({"chat_id": CHAT_ID_GROUP, "thread_id": THREAD_ID, "key": "group"})
+    ch_target = parse_target(CHAT_ID_CHANNEL_RAW, "channel")
+    gr_target = parse_target(CHAT_ID_GROUP_RAW, "group")
+
+    if ch_target: targets.append(ch_target)
+    if gr_target: targets.append(gr_target)
 
     if not targets:
         raise RuntimeError("No se definió ningún destino (CHAT_ID_CHANNEL o CHAT_ID_GROUP)")
@@ -282,12 +299,11 @@ def run_once():
             elif stored != -1:
                 old_kind = state["vid_status"].get(vid)
                 if old_kind != kind:
-                    # Actualizar en los distintos destinos si cambia de estado (ej: de directo a vídeo)
                     if isinstance(stored, dict):
                         for t in targets:
                             mid = stored.get(t["key"])
                             if mid: update_single_msg(bot, t["chat_id"], mid, info, kind)
-                    elif isinstance(stored, int): # Compatibilidad retroactiva
+                    elif isinstance(stored, int):
                         update_single_msg(bot, targets[0]["chat_id"], stored, info, kind)
                     state["vid_status"][vid] = kind
 
