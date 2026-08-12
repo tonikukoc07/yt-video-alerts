@@ -4,23 +4,23 @@ import time
 import requests
 import io
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from telegram import Bot, InputMediaPhoto
-from telegram.error import BadRequest
 
 STATE_FILE = "state.json"
 
 # Variables de entorno
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT_ID = os.environ.get("CHAT_ID", "")
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "")
+CHAT_ID_CHANNEL = os.environ.get("CHAT_ID_CHANNEL", os.environ.get("CHAT_ID", "")) # Canal
+CHAT_ID_GROUP = os.environ.get("CHAT_ID_GROUP", "")                                 # Grupo
+MESSAGE_THREAD_ID = os.environ.get("MESSAGE_THREAD_ID", "")                         # Pestaña (5621)
+
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "") # ID de YouTube
 YT_API_KEY = os.environ.get("YT_API_KEY", "")
 TZ = os.environ.get("TZ", "Europe/Madrid")
 PIN_LATEST = os.environ.get("PIN_LATEST", "1") == "1"
 BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
 
-# ID de la pestaña/tema de Telegram (p. ej. 5621)
-MESSAGE_THREAD_ID = os.environ.get("MESSAGE_THREAD_ID", "")
 THREAD_ID = int(MESSAGE_THREAD_ID) if MESSAGE_THREAD_ID and MESSAGE_THREAD_ID.isdigit() else None
 
 def must_env(name, value):
@@ -67,7 +67,6 @@ def get_recent_community_posts(channel_id):
     }
     try:
         r = requests.get(url, headers=headers, timeout=20)
-        
         data = None
         for pattern in [r'var ytInitialData\s*=\s*({.*?});', r'window\["ytInitialData"\]\s*=\s*({.*?});', r'ytInitialData\s*=\s*({.*?});(?:</script>|\n)']:
             match = re.search(pattern, r.text)
@@ -75,12 +74,9 @@ def get_recent_community_posts(channel_id):
                 data = json.loads(match.group(1))
                 break
                 
-        if not data:
-            print("No se encontró la base de datos interna de YouTube.")
-            return []
+        if not data: return []
 
         raw_posts = []
-        
         try:
             tabs = data.get("contents", {}).get("twoColumnBrowseResultsRenderer", {}).get("tabs", [])
             for tab in tabs:
@@ -94,10 +90,8 @@ def get_recent_community_posts(channel_id):
                             for item in items:
                                 if "backstagePostThreadRenderer" in item:
                                     raw_posts.append(item["backstagePostThreadRenderer"])
-                    if raw_posts:
-                        break
-        except Exception as e:
-            print(f"Error en ruta estructurada: {e}")
+                    if raw_posts: break
+        except Exception: pass
 
         if not raw_posts:
             def extract_posts(obj):
@@ -105,11 +99,9 @@ def get_recent_community_posts(channel_id):
                 if isinstance(obj, dict):
                     if "backstagePostThreadRenderer" in obj:
                         found.append(obj["backstagePostThreadRenderer"])
-                    for k, v in obj.items():
-                        found.extend(extract_posts(v))
+                    for k, v in obj.items(): found.extend(extract_posts(v))
                 elif isinstance(obj, list):
-                    for item in obj:
-                        found.extend(extract_posts(item))
+                    for item in obj: found.extend(extract_posts(item))
                 return found
 
             seen = set()
@@ -119,15 +111,13 @@ def get_recent_community_posts(channel_id):
                     if pid not in seen:
                         seen.add(pid)
                         raw_posts.append(p)
-                except:
-                    pass
+                except: pass
 
         posts = []
         for item in raw_posts:
             try:
                 post_renderer = item["post"]["backstagePostRenderer"]
                 post_id = post_renderer["postId"]
-                
                 text = ""
                 if "contentText" in post_renderer and "runs" in post_renderer["contentText"]:
                     text = "".join([run.get("text", "") for run in post_renderer["contentText"]["runs"]])
@@ -148,18 +138,11 @@ def get_recent_community_posts(channel_id):
                     "title": text or "Publicación sin texto",
                     "thumb": thumb_url,
                     "link": f"https://www.youtube.com/post/{post_id}",
-                    "is_live": False,
-                    "viewers": None,
-                    "views": None,
-                    "start": None
+                    "is_live": False, "viewers": None, "views": None, "start": None
                 })
-            except Exception as e:
-                print(f"Error extrayendo datos de un post: {e}")
-                
+            except Exception: pass
         return posts
-    except Exception as e:
-        print(f"Error de conexión al canal: {e}")
-    return []
+    except Exception: return []
 
 def yt_video_info(video_id):
     data = yt_get("https://www.googleapis.com/youtube/v3/videos", {
@@ -175,8 +158,7 @@ def yt_video_info(video_id):
 
     thumbs = snippet.get("thumbnails", {}) or {}
     thumb_url = (thumbs.get("maxres") or thumbs.get("high") or thumbs.get("default", {})).get("url")
-    if thumb_url:
-        thumb_url += f"?t={int(time.time())}"
+    if thumb_url: thumb_url += f"?t={int(time.time())}"
 
     return {
         "vid": video_id,
@@ -200,11 +182,9 @@ def iso_to_local(iso_str):
 
 def format_caption(info, kind):
     title = info["title"].replace("<", "&lt;").replace(">", "&gt;")
-    
     if kind == "post":
         max_len = 900 if info.get('thumb') else 4000
-        if len(title) > max_len:
-            title = title[:max_len] + "..."
+        if len(title) > max_len: title = title[:max_len] + "..."
         return f"💬 <b>NUEVA PUBLICACIÓN</b>\n\n{title}\n\n👉 {info['link']}"
 
     if kind == "live":
@@ -214,11 +194,10 @@ def format_caption(info, kind):
     v_line = f"👀 {info['views']} views\n" if info['views'] else ""
     return f"🎥 <b>NUEVO VÍDEO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n👉 {info['link']}"
 
-def send_post(bot, chat_id, info, kind, thread_id=None):
+def send_single_post(bot, chat_id, info, kind, thread_id=None):
     cap = format_caption(info, kind)
     kwargs = {"parse_mode": "HTML"}
-    if thread_id is not None:
-        kwargs["message_thread_id"] = thread_id
+    if thread_id is not None: kwargs["message_thread_id"] = thread_id
 
     if info.get('thumb'):
         try:
@@ -226,11 +205,30 @@ def send_post(bot, chat_id, info, kind, thread_id=None):
             msg = bot.send_photo(chat_id=chat_id, photo=r.content, caption=cap, **kwargs)
             return msg.message_id
         except Exception as e:
-            print(f"Error enviando foto: {e}")
-            pass
+            print(f"Error enviando foto a {chat_id}: {e}")
     return bot.send_message(chat_id=chat_id, text=cap, **kwargs).message_id
 
-def update_msg(bot, chat_id, mid, info, kind):
+def send_to_all_targets(bot, targets, info, kind, is_newest=False):
+    stored_data = {}
+    for t in targets:
+        try:
+            mid = send_single_post(bot, t["chat_id"], info, kind, thread_id=t["thread_id"])
+            stored_data[t["key"]] = mid
+            
+            if PIN_LATEST and is_newest:
+                try:
+                    if t["thread_id"]:
+                        bot.unpin_all_chat_messages(chat_id=t["chat_id"], message_thread_id=t["thread_id"])
+                    else:
+                        bot.unpin_all_chat_messages(chat_id=t["chat_id"])
+                    bot.pin_chat_message(chat_id=t["chat_id"], message_id=mid, disable_notification=True)
+                except Exception as e:
+                    print(f"No se pudo fijar mensaje en {t['key']}: {e}")
+        except Exception as e:
+            print(f"Error enviando a target {t['key']}: {e}")
+    return stored_data
+
+def update_single_msg(bot, chat_id, mid, info, kind):
     cap = format_caption(info, kind)
     try:
         r = requests.get(info['thumb'], timeout=20)
@@ -245,19 +243,21 @@ def update_msg(bot, chat_id, mid, info, kind):
 
 def run_once():
     must_env("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
-    must_env("CHAT_ID", CHAT_ID)
     bot = Bot(token=TELEGRAM_TOKEN)
-    
-    try:
-        chat_id = int(CHAT_ID)
-    except ValueError:
-        chat_id = CHAT_ID
+
+    # Construir la lista de destinos
+    targets = []
+    if CHAT_ID_CHANNEL:
+        targets.append({"chat_id": CHAT_ID_CHANNEL, "thread_id": None, "key": "channel"})
+    if CHAT_ID_GROUP:
+        targets.append({"chat_id": CHAT_ID_GROUP, "thread_id": THREAD_ID, "key": "group"})
+
+    if not targets:
+        raise RuntimeError("No se definió ningún destino (CHAT_ID_CHANNEL o CHAT_ID_GROUP)")
 
     state = load_state()
 
-    # ========================================
     # 1. PROCESAR VÍDEOS / DIRECTOS
-    # ========================================
     vids = get_recent_video_ids()
     newest_vid = vids[0] if vids else None
     if vids:
@@ -267,40 +267,31 @@ def run_once():
             if not info: continue
 
             kind = "live" if info["is_live"] else "video"
-            mid = state["msg_ids"].get(vid)
-            if not mid: mid = state["msg_ids"].get(f"live:{vid}") or state["msg_ids"].get(f"video:{vid}")
+            stored = state["msg_ids"].get(vid)
             
             if BASELINE_ONLY:
-                if not mid:
+                if not stored:
                     state["msg_ids"][vid] = -1
                     state["vid_status"][vid] = kind
                 continue
 
-            if not mid:
-                mid = send_post(bot, chat_id, info, kind, thread_id=THREAD_ID)
-                state["msg_ids"][vid] = mid
+            if not stored:
+                mids = send_to_all_targets(bot, targets, info, kind, is_newest=(vid == newest_vid))
+                state["msg_ids"][vid] = mids
                 state["vid_status"][vid] = kind
-
-                if PIN_LATEST and vid == newest_vid:
-                    try:
-                        if THREAD_ID is not None:
-                            bot.unpin_all_chat_messages(chat_id=chat_id, message_thread_id=THREAD_ID)
-                        else:
-                            bot.unpin_all_chat_messages(chat_id=chat_id)
-                        bot.pin_chat_message(chat_id=chat_id, message_id=mid, disable_notification=True)
-                    except Exception as e:
-                        print(f"Error fijando mensaje: {e}")
-                        pass
-            elif mid != -1:
+            elif stored != -1:
                 old_kind = state["vid_status"].get(vid)
-                if not old_kind: old_kind = "live" if f"live:{vid}" in state.get("msg_ids", {}) else "video"
                 if old_kind != kind:
-                    if update_msg(bot, chat_id, mid, info, kind):
-                        state["vid_status"][vid] = kind
+                    # Actualizar en los distintos destinos si cambia de estado (ej: de directo a vídeo)
+                    if isinstance(stored, dict):
+                        for t in targets:
+                            mid = stored.get(t["key"])
+                            if mid: update_single_msg(bot, t["chat_id"], mid, info, kind)
+                    elif isinstance(stored, int): # Compatibilidad retroactiva
+                        update_single_msg(bot, targets[0]["chat_id"], stored, info, kind)
+                    state["vid_status"][vid] = kind
 
-    # ========================================
     # 2. PROCESAR PUBLICACIONES (COMUNIDAD)
-    # ========================================
     posts = get_recent_community_posts(CHANNEL_ID)
     if posts:
         latest_post = posts[0]
@@ -311,8 +302,8 @@ def run_once():
                 state["msg_ids_posts"][post_id] = -1
         else:
             if post_id not in state["msg_ids_posts"]:
-                mid = send_post(bot, chat_id, latest_post, "post", thread_id=THREAD_ID)
-                state["msg_ids_posts"][post_id] = mid
+                mids = send_to_all_targets(bot, targets, latest_post, "post")
+                state["msg_ids_posts"][post_id] = mids
 
     save_state(state)
 
