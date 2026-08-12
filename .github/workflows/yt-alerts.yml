@@ -40,7 +40,7 @@ jobs:
           TZ: "Europe/Madrid"
           PIN_LATEST: "1"
           DELETE_LIVE_WHEN_FINALIZED: "1"
-          BASELINE_ONLY: "1"
+          BASELINE_ONLY: "0"
         run: |
           python main.py
 
