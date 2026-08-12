@@ -20,6 +20,13 @@ TZ = os.environ.get("TZ", "Europe/Madrid")
 PIN_LATEST = os.environ.get("PIN_LATEST", "1") == "1"
 BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
 
+# Hilo/Pestana para las bienvenidas (1 por defecto es la pestana General en supergrupos con temas)
+WELCOME_THREAD_ID_RAW = os.environ.get("WELCOME_THREAD_ID", "1")
+try:
+    WELCOME_THREAD_ID = int(WELCOME_THREAD_ID_RAW) if WELCOME_THREAD_ID_RAW else None
+except ValueError:
+    WELCOME_THREAD_ID = None
+
 def must_env(name, value):
     if not value:
         raise RuntimeError(f"Missing env var: {name}")
@@ -50,7 +57,7 @@ def load_state():
             st = json.load(f)
     except Exception: return {}
     
-    for key in ["msg_ids", "msg_ids_posts", "vid_status", "pending_users"]:
+    for key in ["msg_ids", "msg_ids_posts", "vid_status", "pending_users", "pending_welcomes"]:
         if not isinstance(st.get(key), dict): st[key] = {}
     if "last_update_id" not in st or not isinstance(st["last_update_id"], int):
         st["last_update_id"] = 0
@@ -93,8 +100,10 @@ def send_standard_welcome(bot, group_target, user):
         "¡Hagamos de esta una gran comunidad! 🚀"
     )
     kwargs = {"parse_mode": "HTML"}
-    if group_target["thread_id"]:
-        kwargs["message_thread_id"] = group_target["thread_id"]
+    # Enviar al hilo General (1) en vez de al hilo de vídeos
+    if WELCOME_THREAD_ID is not None:
+        kwargs["message_thread_id"] = WELCOME_THREAD_ID
+
     return bot.send_message(chat_id=group_target["chat_id"], text=text, **kwargs).message_id
 
 def send_warning_message(bot, group_target, user, reasons):
@@ -111,8 +120,10 @@ def send_warning_message(bot, group_target, user, reasons):
         "⏳ <b>Tienes 1 HORA para cambiarlo.</b> Si en 60 minutos no está corregido, el sistema te expulsará automáticamente (podrás volver a entrar en cuanto lo arregles)."
     )
     kwargs = {"parse_mode": "HTML"}
-    if group_target["thread_id"]:
-        kwargs["message_thread_id"] = group_target["thread_id"]
+    # Enviar al hilo General (1) en vez de al hilo de vídeos
+    if WELCOME_THREAD_ID is not None:
+        kwargs["message_thread_id"] = WELCOME_THREAD_ID
+
     return bot.send_message(chat_id=group_target["chat_id"], text=text, **kwargs).message_id
 
 def process_moderation(bot, group_target, state):
@@ -132,7 +143,11 @@ def process_moderation(bot, group_target, state):
                     
                     is_compliant, reasons = check_user_compliance(member)
                     if is_compliant:
-                        send_standard_welcome(bot, group_target, member)
+                        msg_id = send_standard_welcome(bot, group_target, member)
+                        state["pending_welcomes"][str(msg_id)] = {
+                            "msg_id": msg_id,
+                            "sent_at": int(time.time())
+                        }
                     else:
                         msg_id = send_warning_message(bot, group_target, member, reasons)
                         state["pending_users"][str(member.id)] = {
@@ -170,7 +185,11 @@ def process_moderation(bot, group_target, state):
                     bot.delete_message(chat_id=group_target["chat_id"], message_id=warning_msg_id)
                 except Exception:
                     pass
-                send_standard_welcome(bot, group_target, user)
+                msg_id = send_standard_welcome(bot, group_target, user)
+                state["pending_welcomes"][str(msg_id)] = {
+                    "msg_id": msg_id,
+                    "sent_at": int(time.time())
+                }
                 to_remove.append(user_id_str)
             elif now - joined_at >= 3600:
                 # Pasaron 60 minutos y sigue sin cumplir -> EXPULSIÓN (Kick sin ban)
@@ -194,6 +213,32 @@ def process_moderation(bot, group_target, state):
     for uid in to_remove:
         if uid in state["pending_users"]:
             del state["pending_users"][uid]
+
+    # 3. Eliminar mensajes de bienvenida tras 2 minutos (120 segundos)
+    now = int(time.time())
+    welcomes = state.get("pending_welcomes", {})
+    welcomes_to_remove = []
+
+    for msg_id_str, wdata in list(welcomes.items()):
+        msg_id = wdata["msg_id"]
+        sent_at = wdata["sent_at"]
+        elapsed = now - sent_at
+
+        # Si aún no han pasado 2 minutos, esperamos el tiempo restante
+        if elapsed < 120:
+            time.sleep(120 - elapsed)
+
+        try:
+            bot.delete_message(chat_id=group_target["chat_id"], message_id=msg_id)
+            print(f"Mensaje de bienvenida {msg_id} eliminado tras 2 minutos.")
+        except Exception as e:
+            print(f"Error borrando mensaje de bienvenida {msg_id}: {e}")
+
+        welcomes_to_remove.append(msg_id_str)
+
+    for wid in welcomes_to_remove:
+        if wid in state["pending_welcomes"]:
+            del state["pending_welcomes"][wid]
 
 def yt_get(url, params):
     params = dict(params)
