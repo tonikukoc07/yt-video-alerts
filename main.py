@@ -15,16 +15,16 @@ STATE_FILE = "state.json"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 
 # Canal 1 Principal
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "UC6efY3r4Oiy0ns4ZEAVw4_A")
-CHAT_ID_GROUP_RAW = os.environ.get("CHAT_ID_GROUP", "-1003839040942_5621") # Vídeos/Directos Ch1
-CHAT_ID_POSTS_RAW = os.environ.get("CHAT_ID_POSTS", "-1003839040942_5801") # Publicaciones Ch1
+CHANNEL_ID = os.environ.get("CHANNEL_ID") or "UC6efY3r4Oiy0ns4ZEAVw4_A"
+CHAT_ID_GROUP_RAW = os.environ.get("CHAT_ID_GROUP") or "-1003839040942_5621" # Vídeos/Directos Ch1
+CHAT_ID_POSTS_RAW = os.environ.get("CHAT_ID_POSTS") or "-1003839040942_5801" # Publicaciones Ch1
 
 # Canal 2 Secundario (Directos)
-CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO", "UCK4h49E7Bol5DD-szyOgFgQ")
-CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO", "-1003839040942_5622") # Vídeos/Directos Ch2
+CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO") or "UCK4h49E7Bol5DD-szyOgFgQ"
+CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO") or "-1003839040942_5622" # Vídeos/Directos Ch2
 
 # Hilo para Bienvenidas / General
-WELCOME_THREAD_ID_RAW = os.environ.get("WELCOME_THREAD_ID", "1")
+WELCOME_THREAD_ID_RAW = os.environ.get("WELCOME_THREAD_ID") or "1"
 
 YT_API_KEY = os.environ.get("YT_API_KEY", "")
 TZ = os.environ.get("TZ", "Europe/Madrid")
