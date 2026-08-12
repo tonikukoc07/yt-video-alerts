@@ -598,8 +598,8 @@ def run_once():
     bot = Bot(token=TELEGRAM_TOKEN)
     state = load_state()
 
-    # Envia un mensaje de prueba al canal de logs en cada ejecucion
-    send_log(bot, "🧪 <b>Prueba de conexión:</b> El bot se ha ejecutado y la conexión con el canal de logs funciona correctamente.")
+    # Si en algún momento necesitas hacer un test forzado, descomenta la siguiente línea:
+    # send_log(bot, "🧪 <b>Prueba de conexión:</b> El bot se ha ejecutado y la conexión con el canal de logs funciona correctamente.")
 
     target_ch1_vids = parse_target(CHAT_ID_GROUP_RAW, "ch1_vids")       # Hilo 5621
     target_ch1_posts = parse_target(CHAT_ID_POSTS_RAW, "ch1_posts")      # Hilo 5801
