@@ -13,11 +13,11 @@ STATE_FILE = "state.json"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID_CHANNEL_RAW = os.environ.get("CHAT_ID_CHANNEL", os.environ.get("CHAT_ID", ""))
 CHAT_ID_GROUP_RAW = os.environ.get("CHAT_ID_GROUP", "")
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "") # ID de YouTube Canal Principal
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "") # ID de YouTube Canal Principal (UC6efY3r4Oiy0ns4ZEAVw4_A)
 
 # Variables de entorno - CANAL SECUNDARIO (DIRECTOS)
 CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO", "") # UCK4h49E7Bol5DD-szyOgFgQ
-CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO", "") # ID del grupo con _5622
+CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO", "") # Hilo 5622
 
 YT_API_KEY = os.environ.get("YT_API_KEY", "")
 TZ = os.environ.get("TZ", "Europe/Madrid")
@@ -247,6 +247,21 @@ def yt_get(url, params):
 
 def get_recent_video_ids(channel_id):
     if not channel_id: return []
+    vids = []
+
+    # 1. RSS Feed (Detecta directos al instante sin cuota de API)
+    try:
+        rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+        r = requests.get(rss_url, timeout=15)
+        if r.status_code == 200:
+            found_vids = re.findall(r'<yt:videoId>(.*?)</yt:videoId>', r.text)
+            for v in found_vids[:5]:
+                if v not in vids:
+                    vids.append(v)
+    except Exception as e:
+        print(f"Error obteniendo RSS de {channel_id}: {e}")
+
+    # 2. Respaldo por Playlist API
     playlist_id = "UU" + channel_id[2:]
     try:
         data = yt_get("https://www.googleapis.com/youtube/v3/playlistItems", {
@@ -254,11 +269,14 @@ def get_recent_video_ids(channel_id):
             "playlistId": playlist_id,
             "maxResults": 3
         })
-        items = data.get("items", [])
-        return [item["snippet"]["resourceId"]["videoId"] for item in items]
+        for item in data.get("items", []):
+            vid = item["snippet"]["resourceId"]["videoId"]
+            if vid not in vids:
+                vids.append(vid)
     except Exception as e:
-        print(f"Error obteniendo vídeos del canal {channel_id}: {e}")
-        return []
+        print(f"Error obteniendo playlist del canal {channel_id}: {e}")
+
+    return vids
 
 def get_recent_community_posts(channel_id):
     if not channel_id: return []
