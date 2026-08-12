@@ -9,37 +9,37 @@ from telegram import Bot, InputMediaPhoto
 
 STATE_FILE = "state.json"
 
-# Variables de entorno - CANAL PRINCIPAL
+# ==========================================================
+# CONFIGURACIÓN Y VARIABLES DE ENTORNO
+# ==========================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT_ID_CHANNEL_RAW = os.environ.get("CHAT_ID_CHANNEL", os.environ.get("CHAT_ID", ""))
-CHAT_ID_GROUP_RAW = os.environ.get("CHAT_ID_GROUP", "")
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "")
 
-# Variables de entorno - CANAL SECUNDARIO (DIRECTOS)
-CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO", "")
-CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO", "")
+# Canal 1 Principal
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "UC6efY3r4Oiy0ns4ZEAVw4_A")
+CHAT_ID_GROUP_RAW = os.environ.get("CHAT_ID_GROUP", "-1003839040942_5621") # Vídeos/Directos Ch1
+CHAT_ID_POSTS_RAW = os.environ.get("CHAT_ID_POSTS", "-1003839040942_5801") # Publicaciones Ch1
+
+# Canal 2 Secundario (Directos)
+CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO", "UCK4h49E7Bol5DD-szyOgFgQ")
+CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO", "-1003839040942_5622") # Vídeos/Directos Ch2
+
+# Hilo para Bienvenidas / General
+WELCOME_THREAD_ID_RAW = os.environ.get("WELCOME_THREAD_ID", "1")
 
 YT_API_KEY = os.environ.get("YT_API_KEY", "")
 TZ = os.environ.get("TZ", "Europe/Madrid")
 PIN_LATEST = os.environ.get("PIN_LATEST", "1") == "1"
 BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
 
-# Hilo para bienvenidas (General / 1)
-WELCOME_THREAD_ID_RAW = os.environ.get("WELCOME_THREAD_ID", "1")
-try:
-    WELCOME_THREAD_ID = int(WELCOME_THREAD_ID_RAW) if WELCOME_THREAD_ID_RAW else None
-except ValueError:
-    WELCOME_THREAD_ID = None
-
 def must_env(name, value):
     if not value:
         raise RuntimeError(f"Missing env var: {name}")
 
-def parse_target(raw_str, key_name):
+def parse_target(raw_str, key_name="default"):
     if not raw_str:
         return None
     thread_id = None
-    clean_str = raw_str.strip()
+    clean_str = str(raw_str).strip()
     
     if "_" in clean_str:
         parts = clean_str.split("_")
@@ -76,6 +76,9 @@ def save_state(st):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(st, f, ensure_ascii=False, indent=2)
 
+# ==========================================================
+# MODERACIÓN Y BIENVENIDAS DE TELEGRAM
+# ==========================================================
 def check_user_compliance(user):
     reasons = []
     has_username = bool(user.username)
@@ -95,7 +98,7 @@ def format_mention(user):
     name = user.first_name.replace("<", "&lt;").replace(">", "&gt;")
     return f'<a href="tg://user?id={user.id}">{name}</a>'
 
-def send_standard_welcome(bot, group_target, user):
+def send_standard_welcome(bot, group_target, user, thread_id=1):
     mention = format_mention(user)
     text = (
         f"¡Hola {mention}, bienvenido/a a la comunidad! 👋\n\n"
@@ -109,12 +112,12 @@ def send_standard_welcome(bot, group_target, user):
         "¡Hagamos de esta una gran comunidad! 🚀"
     )
     kwargs = {"parse_mode": "HTML"}
-    if WELCOME_THREAD_ID is not None:
-        kwargs["message_thread_id"] = WELCOME_THREAD_ID
+    if thread_id is not None:
+        kwargs["message_thread_id"] = thread_id
 
     return bot.send_message(chat_id=group_target["chat_id"], text=text, **kwargs).message_id
 
-def send_warning_message(bot, group_target, user, reasons):
+def send_warning_message(bot, group_target, user, reasons, thread_id=1):
     mention = format_mention(user)
     reasons_text = "\n".join([f"• {r}" for r in reasons])
     text = (
@@ -128,12 +131,12 @@ def send_warning_message(bot, group_target, user, reasons):
         "⏳ <b>Tienes 1 HORA para cambiarlo.</b> Si en 60 minutos no está corregido, el sistema te expulsará automáticamente (podrás volver a entrar en cuanto lo arregles)."
     )
     kwargs = {"parse_mode": "HTML"}
-    if WELCOME_THREAD_ID is not None:
-        kwargs["message_thread_id"] = WELCOME_THREAD_ID
+    if thread_id is not None:
+        kwargs["message_thread_id"] = thread_id
 
     return bot.send_message(chat_id=group_target["chat_id"], text=text, **kwargs).message_id
 
-def process_moderation(bot, group_target, state):
+def process_moderation(bot, group_target, state, welcome_thread_id=1):
     if not group_target:
         return
 
@@ -150,13 +153,13 @@ def process_moderation(bot, group_target, state):
                     
                     is_compliant, reasons = check_user_compliance(member)
                     if is_compliant:
-                        msg_id = send_standard_welcome(bot, group_target, member)
+                        msg_id = send_standard_welcome(bot, group_target, member, thread_id=welcome_thread_id)
                         state["pending_welcomes"][str(msg_id)] = {
                             "msg_id": msg_id,
                             "sent_at": int(time.time())
                         }
                     else:
-                        msg_id = send_warning_message(bot, group_target, member, reasons)
+                        msg_id = send_warning_message(bot, group_target, member, reasons, thread_id=welcome_thread_id)
                         state["pending_users"][str(member.id)] = {
                             "user_id": member.id,
                             "joined_at": int(time.time()),
@@ -165,7 +168,7 @@ def process_moderation(bot, group_target, state):
     except Exception as e:
         print(f"Error procesando nuevos miembros: {e}")
 
-    # 2. Revisar usuarios en lista de espera (60 min)
+    # 2. Expulsión tras 60 minutos si no corrigen perfil
     now = int(time.time())
     pending = state.get("pending_users", {})
     to_remove = []
@@ -190,7 +193,7 @@ def process_moderation(bot, group_target, state):
                     bot.delete_message(chat_id=group_target["chat_id"], message_id=warning_msg_id)
                 except Exception:
                     pass
-                msg_id = send_standard_welcome(bot, group_target, user)
+                msg_id = send_standard_welcome(bot, group_target, user, thread_id=welcome_thread_id)
                 state["pending_welcomes"][str(msg_id)] = {
                     "msg_id": msg_id,
                     "sent_at": int(time.time())
@@ -205,7 +208,7 @@ def process_moderation(bot, group_target, state):
                 try:
                     bot.ban_chat_member(chat_id=group_target["chat_id"], user_id=user_id)
                     bot.unban_chat_member(chat_id=group_target["chat_id"], user_id=user_id)
-                    print(f"Usuario {user_id} expulsado por no cumplir las normas tras 1 hora.")
+                    print(f"Usuario {user_id} expulsado por no cumplir las normas.")
                 except Exception as e:
                     print(f"Error al expulsar usuario {user_id}: {e}")
 
@@ -218,7 +221,7 @@ def process_moderation(bot, group_target, state):
         if uid in state["pending_users"]:
             del state["pending_users"][uid]
 
-    # 3. Eliminar mensajes de bienvenida tras 2 minutos (120 s)
+    # 3. Eliminar mensaje de bienvenida tras 2 minutos (120 s)
     now = int(time.time())
     welcomes = state.get("pending_welcomes", {})
     welcomes_to_remove = []
@@ -228,21 +231,21 @@ def process_moderation(bot, group_target, state):
         sent_at = wdata["sent_at"]
         elapsed = now - sent_at
 
-        if elapsed < 120:
-            time.sleep(120 - elapsed)
-
-        try:
-            bot.delete_message(chat_id=group_target["chat_id"], message_id=msg_id)
-            print(f"Mensaje de bienvenida {msg_id} eliminado tras 2 minutos.")
-        except Exception as e:
-            print(f"Error borrando mensaje de bienvenida {msg_id}: {e}")
-
-        welcomes_to_remove.append(msg_id_str)
+        if elapsed >= 120:
+            try:
+                bot.delete_message(chat_id=group_target["chat_id"], message_id=msg_id)
+                print(f"Bienvenida {msg_id} eliminada tras 2 minutos.")
+            except Exception as e:
+                print(f"Error borrando mensaje de bienvenida {msg_id}: {e}")
+            welcomes_to_remove.append(msg_id_str)
 
     for wid in welcomes_to_remove:
         if wid in state["pending_welcomes"]:
             del state["pending_welcomes"][wid]
 
+# ==========================================================
+# FUNCIONES YOUTUBE Y ENVÍO DE AVISOS
+# ==========================================================
 def yt_get(url, params):
     params = dict(params)
     params["key"] = YT_API_KEY
@@ -254,34 +257,7 @@ def get_recent_video_ids(channel_id):
     if not channel_id: return []
     vids = []
 
-    # 1. RSS Feed (Rápido para subidas y eventos inmediatos)
-    try:
-        rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-        r = requests.get(rss_url, timeout=15)
-        if r.status_code == 200:
-            found_vids = re.findall(r'<yt:videoId>(.*?)</yt:videoId>', r.text)
-            for v in found_vids[:5]:
-                if v not in vids:
-                    vids.append(v)
-    except Exception as e:
-        print(f"Error obteniendo RSS de {channel_id}: {e}")
-
-    # 2. Respaldo por Playlist API (Lista UU...)
-    playlist_id = "UU" + channel_id[2:]
-    try:
-        data = yt_get("https://www.googleapis.com/youtube/v3/playlistItems", {
-            "part": "snippet",
-            "playlistId": playlist_id,
-            "maxResults": 3
-        })
-        for item in data.get("items", []):
-            vid = item["snippet"]["resourceId"]["videoId"]
-            if vid not in vids:
-                vids.append(vid)
-    except Exception as e:
-        print(f"Error obteniendo playlist del canal {channel_id}: {e}")
-
-    # 3. Búsqueda explícita de Directos en vivo (Para no perder transmisiones activas)
+    # 1. Búsqueda explícita de Directos en VIVO activos (Indispensable para directos en emisión)
     if YT_API_KEY:
         try:
             data_live = yt_get("https://www.googleapis.com/youtube/v3/search", {
@@ -297,6 +273,33 @@ def get_recent_video_ids(channel_id):
                     vids.append(vid)
         except Exception as e:
             print(f"Error buscando directos activos para {channel_id}: {e}")
+
+    # 2. Respaldo por Playlist API (Lista UU...)
+    playlist_id = "UU" + channel_id[2:]
+    try:
+        data = yt_get("https://www.googleapis.com/youtube/v3/playlistItems", {
+            "part": "snippet",
+            "playlistId": playlist_id,
+            "maxResults": 5
+        })
+        for item in data.get("items", []):
+            vid = item["snippet"]["resourceId"]["videoId"]
+            if vid not in vids:
+                vids.append(vid)
+    except Exception as e:
+        print(f"Error obteniendo playlist del canal {channel_id}: {e}")
+
+    # 3. RSS Feed
+    try:
+        rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+        r = requests.get(rss_url, timeout=15)
+        if r.status_code == 200:
+            found_vids = re.findall(r'<yt:videoId>(.*?)</yt:videoId>', r.text)
+            for v in found_vids[:5]:
+                if v not in vids:
+                    vids.append(v)
+    except Exception as e:
+        print(f"Error obteniendo RSS de {channel_id}: {e}")
 
     return vids
 
@@ -436,141 +439,134 @@ def format_caption(info, kind):
     v_line = f"👀 {info['views']} views\n" if info['views'] else ""
     return f"🎥 <b>NUEVO VÍDEO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n👉 {info['link']}"
 
-def send_single_post(bot, chat_id, info, kind, thread_id=None):
+def send_post(bot, target, info, kind):
     cap = format_caption(info, kind)
     kwargs = {"parse_mode": "HTML"}
-    if thread_id is not None: kwargs["message_thread_id"] = thread_id
+    if target.get("thread_id") is not None:
+        kwargs["message_thread_id"] = target["thread_id"]
 
     if info.get('thumb'):
         try:
             r = requests.get(info['thumb'], timeout=20)
-            msg = bot.send_photo(chat_id=chat_id, photo=r.content, caption=cap, **kwargs)
+            msg = bot.send_photo(chat_id=target["chat_id"], photo=r.content, caption=cap, **kwargs)
             return msg.message_id
         except Exception as e:
-            print(f"Error enviando foto a {chat_id}: {e}")
-    return bot.send_message(chat_id=chat_id, text=cap, **kwargs).message_id
+            print(f"Error enviando foto a {target['chat_id']}: {e}")
 
-def send_to_all_targets(bot, targets, info, kind, is_newest=False):
-    stored_data = {}
-    for t in targets:
-        try:
-            mid = send_single_post(bot, t["chat_id"], info, kind, thread_id=t["thread_id"])
-            stored_data[t["key"]] = mid
-            
-            if PIN_LATEST and is_newest:
-                try:
-                    if t["thread_id"]:
-                        bot.unpin_all_chat_messages(chat_id=t["chat_id"], message_thread_id=t["thread_id"])
-                    else:
-                        bot.unpin_all_chat_messages(chat_id=t["chat_id"])
-                    bot.pin_chat_message(chat_id=t["chat_id"], message_id=mid, disable_notification=True)
-                except Exception as e:
-                    print(f"No se pudo fijar mensaje en {t['key']}: {e}")
-        except Exception as e:
-            print(f"Error enviando a target {t['key']}: {e}")
-    return stored_data
+    msg = bot.send_message(chat_id=target["chat_id"], text=cap, **kwargs)
+    return msg.message_id
 
-def update_single_msg(bot, chat_id, mid, info, kind):
+def update_msg(bot, target, mid, info, kind):
     cap = format_caption(info, kind)
     try:
         r = requests.get(info['thumb'], timeout=20)
         media = InputMediaPhoto(media=io.BytesIO(r.content), caption=cap, parse_mode="HTML")
-        bot.edit_message_media(chat_id=chat_id, message_id=mid, media=media)
+        bot.edit_message_media(chat_id=target["chat_id"], message_id=mid, media=media)
         return True
-    except:
+    except Exception:
         try: 
-            bot.edit_message_caption(chat_id=chat_id, message_id=mid, caption=cap, parse_mode="HTML")
+            bot.edit_message_caption(chat_id=target["chat_id"], message_id=mid, caption=cap, parse_mode="HTML")
             return True
-        except: return False
+        except Exception:
+            return False
 
-def process_channel_updates(bot, targets, channel_id, state):
-    if not targets or not channel_id:
+def process_channel_videos(bot, target, channel_id, state):
+    if not target or not channel_id:
         return
 
-    # 1. PROCESAR VÍDEOS / DIRECTOS
     vids = get_recent_video_ids(channel_id)
     newest_vid = vids[0] if vids else None
+
     if vids:
-        vids.reverse() 
+        vids.reverse() # Procesar del más antiguo al más reciente
         for vid in vids:
             info = yt_video_info(vid)
             if not info: continue
 
             kind = "live" if info["is_live"] else "video"
-            stored = state["msg_ids"].get(vid)
-            
+            mid = state["msg_ids"].get(vid)
+
             if BASELINE_ONLY:
-                if not stored:
+                if not mid:
                     state["msg_ids"][vid] = -1
                     state["vid_status"][vid] = kind
                 continue
 
             # Publicación por primera vez
-            if not stored:
-                mids = send_to_all_targets(bot, targets, info, kind, is_newest=(vid == newest_vid))
-                state["msg_ids"][vid] = mids
+            if not mid:
+                mid = send_post(bot, target, info, kind)
+                state["msg_ids"][vid] = mid
                 state["vid_status"][vid] = kind
-            # Si ya existía, comprobar si cambió de Directo -> Vídeo
-            elif stored != -1:
+
+                if PIN_LATEST and vid == newest_vid:
+                    try:
+                        if target.get("thread_id"):
+                            bot.unpin_all_chat_messages(chat_id=target["chat_id"], message_thread_id=target["thread_id"])
+                        else:
+                            bot.unpin_all_chat_messages(chat_id=target["chat_id"])
+                        bot.pin_chat_message(chat_id=target["chat_id"], message_id=mid, disable_notification=True)
+                    except Exception as e:
+                        print(f"Error al fijar mensaje: {e}")
+
+            # Si ya existía, comprobar si finalizó el directo (Directo -> Vídeo)
+            elif mid != -1:
                 old_kind = state["vid_status"].get(vid)
                 if old_kind != kind:
-                    if isinstance(stored, dict):
-                        for t in targets:
-                            mid = stored.get(t["key"])
-                            if mid: update_single_msg(bot, t["chat_id"], mid, info, kind)
-                    elif isinstance(stored, int):
-                        update_single_msg(bot, targets[0]["chat_id"], stored, info, kind)
-                    state["vid_status"][vid] = kind
+                    actual_mid = mid if isinstance(mid, int) else mid.get(target["key"])
+                    if actual_mid:
+                        if update_msg(bot, target, actual_mid, info, kind):
+                            state["vid_status"][vid] = kind
 
-    # 2. PROCESAR PUBLICACIONES (COMUNIDAD)
+def process_channel_posts(bot, target, channel_id, state):
+    if not target or not channel_id:
+        return
+
     posts = get_recent_community_posts(channel_id)
     if posts:
         latest_post = posts[0]
         post_id = latest_post["vid"]
-        
+
         if BASELINE_ONLY:
             if post_id not in state["msg_ids_posts"]:
                 state["msg_ids_posts"][post_id] = -1
         else:
             if post_id not in state["msg_ids_posts"]:
-                mids = send_to_all_targets(bot, targets, latest_post, "post")
-                state["msg_ids_posts"][post_id] = mids
+                mid = send_post(bot, target, latest_post, "post")
+                state["msg_ids_posts"][post_id] = mid
 
+# ==========================================================
+# EJECUCIÓN PRINCIPAL
+# ==========================================================
 def run_once():
     must_env("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
     bot = Bot(token=TELEGRAM_TOKEN)
-
     state = load_state()
 
-    # Destinos Canal 1 (Canal principal)
-    targets_main = []
-    ch_target = parse_target(CHAT_ID_CHANNEL_RAW, "channel")
-    gr_target = parse_target(CHAT_ID_GROUP_RAW, "group")
-    if ch_target: targets_main.append(ch_target)
-    if gr_target: targets_main.append(gr_target)
+    # Objetos de destino parseados
+    target_ch1_vids = parse_target(CHAT_ID_GROUP_RAW, "ch1_vids")       # Hilo 5621
+    target_ch1_posts = parse_target(CHAT_ID_POSTS_RAW, "ch1_posts")      # Hilo 5801
+    target_ch2_vids = parse_target(CHAT_ID_GROUP_DIRECTO_RAW, "ch2_vids") # Hilo 5622
 
-    # Destinos Canal 2 (Canal de Directos -> Hilo 5622)
-    targets_directo = []
-    gr_directo_target = parse_target(CHAT_ID_GROUP_DIRECTO_RAW, "group_directo")
-    if gr_directo_target: targets_directo.append(gr_directo_target)
+    try:
+        welcome_thread_id = int(WELCOME_THREAD_ID_RAW) if WELCOME_THREAD_ID_RAW else 1
+    except ValueError:
+        welcome_thread_id = 1
 
-    # ========================================
-    # A. MODERACIÓN Y BIENVENIDAS EN EL GRUPO
-    # ========================================
-    if gr_target:
-        process_moderation(bot, gr_target, state)
+    # 1. Moderación y bienvenidas
+    if target_ch1_vids:
+        process_moderation(bot, target_ch1_vids, state, welcome_thread_id=welcome_thread_id)
 
-    # ========================================
-    # B. AVISOS DE YOUTUBE - CANAL PRINCIPAL
-    # ========================================
-    if CHANNEL_ID and targets_main:
-        process_channel_updates(bot, targets_main, CHANNEL_ID, state)
+    # 2. Canal 1 (UC6efY3r4Oiy0ns4ZEAVw4_A) - Vídeos y Directos -> Hilo 5621
+    if CHANNEL_ID and target_ch1_vids:
+        process_channel_videos(bot, target_ch1_vids, CHANNEL_ID, state)
 
-    # ========================================
-    # C. AVISOS DE YOUTUBE - CANAL DIRECTOS
-    # ========================================
-    if CHANNEL_ID_DIRECTO and targets_directo:
-        process_channel_updates(bot, targets_directo, CHANNEL_ID_DIRECTO, state)
+    # 3. Canal 1 (UC6efY3r4Oiy0ns4ZEAVw4_A) - Publicaciones Comunidad -> Hilo 5801
+    if CHANNEL_ID and target_ch1_posts:
+        process_channel_posts(bot, target_ch1_posts, CHANNEL_ID, state)
+
+    # 4. Canal 2 (UCK4h49E7Bol5DD-szyOgFgQ) - Vídeos y Directos -> Hilo 5622
+    if CHANNEL_ID_DIRECTO and target_ch2_vids:
+        process_channel_videos(bot, target_ch2_vids, CHANNEL_ID_DIRECTO, state)
 
     save_state(state)
 
