@@ -108,15 +108,17 @@ def send_telegram_msg(bot, chat_id, text, thread_id=None, parse_mode="HTML"):
     return msg.message_id
 
 def send_log(bot, text):
-    """Envía un reporte de actividad al canal de logs privado."""
+    """Envía un reporte de actividad al canal de logs privado con diagnóstico de errores."""
     log_target = parse_target(LOG_CHAT_ID_RAW, "log_channel")
     if not log_target:
+        print("⚠️ Log Omitido: LOG_CHAT_ID_RAW no está definido.")
         return
     try:
         log_text = f"🤖 <b>LOG BOT PRO:</b>\n{text}"
         send_telegram_msg(bot, log_target["chat_id"], log_text, thread_id=log_target.get("thread_id"))
+        print(f"✅ Log enviado correctamente al chat {log_target['chat_id']}")
     except Exception as e:
-        print(f"Error enviando mensaje de log: {e}")
+        print(f"❌ ERROR CRÍTICO enviando log al chat {log_target['chat_id']}: {e}")
 
 # ==========================================================
 # MODERACIÓN Y BIENVENIDAS DE TELEGRAM
@@ -595,6 +597,9 @@ def run_once():
     must_env("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
     bot = Bot(token=TELEGRAM_TOKEN)
     state = load_state()
+
+    # Envia un mensaje de prueba al canal de logs en cada ejecucion
+    send_log(bot, "🧪 <b>Prueba de conexión:</b> El bot se ha ejecutado y la conexión con el canal de logs funciona correctamente.")
 
     target_ch1_vids = parse_target(CHAT_ID_GROUP_RAW, "ch1_vids")       # Hilo 5621
     target_ch1_posts = parse_target(CHAT_ID_POSTS_RAW, "ch1_posts")      # Hilo 5801
