@@ -23,7 +23,7 @@ CHAT_ID_POSTS_RAW = os.environ.get("CHAT_ID_POSTS") or "-1003839040942_5801" # P
 CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO") or "UCK4h49E7Bol5DD-szyOgFgQ"
 CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO") or "-1003839040942_5622" # Vídeos/Directos Ch2
 
-# Hilo para Bienvenidas / General
+# Hilo para Bienvenidas / General (Acepta "1" o "-1003839040942_1")
 WELCOME_THREAD_ID_RAW = os.environ.get("WELCOME_THREAD_ID") or "1"
 
 YT_API_KEY = os.environ.get("YT_API_KEY", "")
@@ -53,6 +53,19 @@ def parse_target(raw_str, key_name="default"):
         chat_id = clean_str
         
     return {"chat_id": chat_id, "thread_id": thread_id, "key": key_name}
+
+def parse_thread_id(raw_val):
+    if not raw_val:
+        return 1
+    val_str = str(raw_val).strip()
+    if "_" in val_str:
+        parts = val_str.split("_")
+        if len(parts) > 1 and parts[1].isdigit():
+            return int(parts[1])
+    try:
+        return int(val_str)
+    except ValueError:
+        return 1
 
 def load_state():
     st = {}
@@ -140,7 +153,6 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
     if not group_target:
         return
 
-    # 1. Obtenemos actualizaciones (incluye chat_member para accesos por enlace)
     last_update_id = state.get("last_update_id", 0)
     try:
         updates = bot.get_updates(
@@ -152,10 +164,8 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
             state["last_update_id"] = u.update_id
             new_members = []
 
-            # Evento estándar de mensaje de servicio
             if u.message and u.message.new_chat_members:
                 new_members = [m for m in u.message.new_chat_members if not m.is_bot]
-            # Evento de unión por enlace de invitación
             elif u.chat_member and u.chat_member.new_chat_member:
                 cm = u.chat_member.new_chat_member
                 if cm.status in ["member", "administrator"] and u.chat_member.old_chat_member.status in ["left", "kicked", "restricted"]:
@@ -180,7 +190,7 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
     except Exception as e:
         print(f"Error procesando nuevos miembros: {e}")
 
-    # 2. Expulsión tras 60 minutos si no cumplen las normas
+    # Expulsión tras 60 minutos si no cumplen las normas
     now = int(time.time())
     pending = state.get("pending_users", {})
     to_remove = []
@@ -233,7 +243,7 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
         if uid in state["pending_users"]:
             del state["pending_users"][uid]
 
-    # 3. Eliminar mensaje de bienvenida tras 2 minutos (120 s) exactos
+    # Borrado de bienvenida a los 2 minutos
     now = int(time.time())
     welcomes = state.get("pending_welcomes", {})
     welcomes_to_remove = []
@@ -243,7 +253,6 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
         sent_at = wdata["sent_at"]
         elapsed = now - sent_at
 
-        # Esperar lo restante hasta cumplir los 120 segundos
         if elapsed < 120:
             time.sleep(120 - elapsed)
 
@@ -557,10 +566,7 @@ def run_once():
     target_ch1_posts = parse_target(CHAT_ID_POSTS_RAW, "ch1_posts")      # Hilo 5801
     target_ch2_vids = parse_target(CHAT_ID_GROUP_DIRECTO_RAW, "ch2_vids") # Hilo 5622
 
-    try:
-        welcome_thread_id = int(WELCOME_THREAD_ID_RAW) if WELCOME_THREAD_ID_RAW else 1
-    except ValueError:
-        welcome_thread_id = 1
+    welcome_thread_id = parse_thread_id(WELCOME_THREAD_ID_RAW)
 
     # 1. Moderación y bienvenidas
     if target_ch1_vids:
