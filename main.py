@@ -89,6 +89,21 @@ def save_state(st):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(st, f, ensure_ascii=False, indent=2)
 
+def send_telegram_msg(bot, chat_id, text, thread_id=None, parse_mode="HTML"):
+    """Envía un mensaje intentando con thread_id y cayendo a envío directo si es el tema General."""
+    kwargs = {"parse_mode": parse_mode}
+    if thread_id is not None:
+        try:
+            kwargs["message_thread_id"] = thread_id
+            msg = bot.send_message(chat_id=chat_id, text=text, **kwargs)
+            return msg.message_id
+        except Exception as e:
+            print(f"Aviso: No se pudo enviar con thread_id={thread_id} ({e}). Intentando envío directo al chat...")
+
+    kwargs.pop("message_thread_id", None)
+    msg = bot.send_message(chat_id=chat_id, text=text, **kwargs)
+    return msg.message_id
+
 # ==========================================================
 # MODERACIÓN Y BIENVENIDAS DE TELEGRAM
 # ==========================================================
@@ -108,7 +123,7 @@ def check_user_compliance(user):
 def format_mention(user):
     if user.username:
         return f"@{user.username}"
-    name = user.first_name.replace("<", "&lt;").replace(">", "&gt;")
+    name = (user.first_name or "Usuario").replace("<", "&lt;").replace(">", "&gt;")
     return f'<a href="tg://user?id={user.id}">{name}</a>'
 
 def send_standard_welcome(bot, group_target, user, thread_id=1):
@@ -124,11 +139,7 @@ def send_standard_welcome(bot, group_target, user, thread_id=1):
         "👉 Escribe #normas para leer las reglas rápidas del grupo.\n\n"
         "¡Hagamos de esta una gran comunidad! 🚀"
     )
-    kwargs = {"parse_mode": "HTML"}
-    if thread_id is not None:
-        kwargs["message_thread_id"] = thread_id
-
-    return bot.send_message(chat_id=group_target["chat_id"], text=text, **kwargs).message_id
+    return send_telegram_msg(bot, group_target["chat_id"], text, thread_id=thread_id)
 
 def send_warning_message(bot, group_target, user, reasons, thread_id=1):
     mention = format_mention(user)
@@ -143,11 +154,7 @@ def send_warning_message(bot, group_target, user, reasons, thread_id=1):
         "3️⃣ Pon un <b>nombre de perfil con al menos 3 letras reales</b>.\n\n"
         "⏳ <b>Tienes 1 HORA para cambiarlo.</b> Si en 60 minutos no está corregido, el sistema te expulsará automáticamente (podrás volver a entrar en cuanto lo arregles)."
     )
-    kwargs = {"parse_mode": "HTML"}
-    if thread_id is not None:
-        kwargs["message_thread_id"] = thread_id
-
-    return bot.send_message(chat_id=group_target["chat_id"], text=text, **kwargs).message_id
+    return send_telegram_msg(bot, group_target["chat_id"], text, thread_id=thread_id)
 
 def process_moderation(bot, group_target, state, welcome_thread_id=1):
     if not group_target:
@@ -156,39 +163,56 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
     last_update_id = state.get("last_update_id", 0)
     try:
         updates = bot.get_updates(
-            offset=last_update_id + 1,
+            offset=last_update_id + 1 if last_update_id > 0 else None,
             timeout=5,
             allowed_updates=["message", "chat_member"]
         )
+        print(f"🔍 Moderación: Recibidas {len(updates)} actualizaciones de Telegram.")
+
         for u in updates:
             state["last_update_id"] = u.update_id
             new_members = []
 
+            # Opción A: Mensaje estándar de entrada
             if u.message and u.message.new_chat_members:
-                new_members = [m for m in u.message.new_chat_members if not m.is_bot]
-            elif u.chat_member and u.chat_member.new_chat_member:
+                for m in u.message.new_chat_members:
+                    if not m.is_bot:
+                        new_members.append(m)
+
+            # Opción B: Evento chat_member (enlaces de invitación)
+            if u.chat_member and u.chat_member.new_chat_member:
                 cm = u.chat_member.new_chat_member
-                if cm.status in ["member", "administrator"] and u.chat_member.old_chat_member.status in ["left", "kicked", "restricted"]:
-                    if not cm.user.is_bot:
-                        new_members = [cm.user]
+                user = getattr(cm, 'user', None) or getattr(u.chat_member, 'user', None)
+                if user and not user.is_bot:
+                    status = getattr(cm, 'status', '')
+                    if status in ["member", "administrator", "creator"]:
+                        if user not in new_members:
+                            new_members.append(user)
 
             for member in new_members:
-                is_compliant, reasons = check_user_compliance(member)
-                if is_compliant:
-                    msg_id = send_standard_welcome(bot, group_target, member, thread_id=welcome_thread_id)
-                    state["pending_welcomes"][str(msg_id)] = {
-                        "msg_id": msg_id,
-                        "sent_at": int(time.time())
-                    }
-                else:
-                    msg_id = send_warning_message(bot, group_target, member, reasons, thread_id=welcome_thread_id)
-                    state["pending_users"][str(member.id)] = {
-                        "user_id": member.id,
-                        "joined_at": int(time.time()),
-                        "warning_msg_id": msg_id
-                    }
+                try:
+                    print(f"👤 Detectado nuevo miembro: {member.first_name} (ID: {member.id})")
+                    is_compliant, reasons = check_user_compliance(member)
+                    if is_compliant:
+                        msg_id = send_standard_welcome(bot, group_target, member, thread_id=welcome_thread_id)
+                        state["pending_welcomes"][str(msg_id)] = {
+                            "msg_id": msg_id,
+                            "sent_at": int(time.time())
+                        }
+                        print(f"✅ Enviada bienvenida estándar (Msg ID: {msg_id})")
+                    else:
+                        msg_id = send_warning_message(bot, group_target, member, reasons, thread_id=welcome_thread_id)
+                        state["pending_users"][str(member.id)] = {
+                            "user_id": member.id,
+                            "joined_at": int(time.time()),
+                            "warning_msg_id": msg_id
+                        }
+                        print(f"⚠️ Enviado aviso de perfil incompleto (Msg ID: {msg_id})")
+                except Exception as ex_m:
+                    print(f"Error procesando bienvenida individual: {ex_m}")
+
     except Exception as e:
-        print(f"Error procesando nuevos miembros: {e}")
+        print(f"Error en procesar actualizaciones de Telegram: {e}")
 
     # Expulsión tras 60 minutos si no cumplen las normas
     now = int(time.time())
@@ -243,7 +267,7 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
         if uid in state["pending_users"]:
             del state["pending_users"][uid]
 
-    # Borrado de bienvenida a los 2 minutos
+    # Borrado de bienvenida a los 2 minutos (120 s)
     now = int(time.time())
     welcomes = state.get("pending_welcomes", {})
     welcomes_to_remove = []
@@ -258,7 +282,7 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
 
         try:
             bot.delete_message(chat_id=group_target["chat_id"], message_id=msg_id)
-            print(f"Bienvenida {msg_id} eliminada tras 2 minutos.")
+            print(f"🗑️ Bienvenida {msg_id} eliminada tras 2 minutos.")
         except Exception as e:
             print(f"Error borrando mensaje de bienvenida {msg_id}: {e}")
 
