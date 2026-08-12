@@ -278,7 +278,7 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
         if uid in state["pending_users"]:
             del state["pending_users"][uid]
 
-    # Borrado de bienvenida a los 2 minutos (120 s)
+    # Borrado de bienvenida a los 2 minutos (120 s) sin congelar la ejecución
     now = int(time.time())
     welcomes = state.get("pending_welcomes", {})
     welcomes_to_remove = []
@@ -288,15 +288,12 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
         sent_at = wdata["sent_at"]
         elapsed = now - sent_at
 
-        if elapsed < 120:
-            time.sleep(120 - elapsed)
-
-        try:
-            bot.delete_message(chat_id=group_target["chat_id"], message_id=msg_id)
-        except Exception as e:
-            print(f"Error borrando mensaje de bienvenida {msg_id}: {e}")
-
-        welcomes_to_remove.append(msg_id_str)
+        if elapsed >= 120:
+            try:
+                bot.delete_message(chat_id=group_target["chat_id"], message_id=msg_id)
+            except Exception as e:
+                print(f"Error borrando mensaje de bienvenida {msg_id}: {e}")
+            welcomes_to_remove.append(msg_id_str)
 
     for wid in welcomes_to_remove:
         if wid in state["pending_welcomes"]:
