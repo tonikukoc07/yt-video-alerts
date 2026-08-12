@@ -30,7 +30,6 @@ def parse_target(raw_str, key_name):
     thread_id = None
     clean_str = raw_str.strip()
     
-    # Extraer ID de la pestaña si viene en formato -100xxx_5621
     if "_" in clean_str:
         parts = clean_str.split("_")
         clean_str = parts[0]
@@ -51,13 +50,150 @@ def load_state():
             st = json.load(f)
     except Exception: return {}
     
-    for key in ["msg_ids", "msg_ids_posts", "vid_status"]:
+    for key in ["msg_ids", "msg_ids_posts", "vid_status", "pending_users"]:
         if not isinstance(st.get(key), dict): st[key] = {}
+    if "last_update_id" not in st or not isinstance(st["last_update_id"], int):
+        st["last_update_id"] = 0
     return st
 
 def save_state(st):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(st, f, ensure_ascii=False, indent=2)
+
+def check_user_compliance(user):
+    reasons = []
+    has_username = bool(user.username)
+    first_name = (user.first_name or "").strip()
+    has_valid_name = len(first_name) >= 3
+
+    if not has_username:
+        reasons.append("No tienes un @alias/nombre de usuario configurado.")
+    if not has_valid_name:
+        reasons.append("Tu nombre de perfil tiene menos de 3 letras o es solo un símbolo.")
+
+    return len(reasons) == 0, reasons
+
+def format_mention(user):
+    if user.username:
+        return f"@{user.username}"
+    name = user.first_name.replace("<", "&lt;").replace(">", "&gt;")
+    return f'<a href="tg://user?id={user.id}">{name}</a>'
+
+def send_standard_welcome(bot, group_target, user):
+    mention = format_mention(user)
+    text = (
+        f"¡Hola {mention}, bienvenido/a a la comunidad! 👋\n\n"
+        "La idea de este espacio es ayudarnos entre todos. Si encuentras alguna novedad, herramienta o información interesante que creas que nos puede servir a los demás, ¡compártela!\n\n"
+        "También está totalmente permitido compartir enlaces o recursos si con eso ayudamos a resolver la duda de otro miembro.\n\n"
+        "⚠️ <b>REQUISITO IMPORTANTE:</b>\n"
+        "📌 Recuerda que según las normas del grupo es obligatorio tener un <b>nombre real configurado</b> en tu perfil de Telegram. Si tu cuenta no tiene nombre o solo tiene un punto/símbolo, por favor cámbialo en tus ajustes para evitar que los sistemas de moderación te expulsen.\n\n"
+        "🛠️ <b>Antes de empezar:</b>\n"
+        "👉 Tienes todas las descargas, tutoriales y enlaces en el <b>MENSAJE FIJADO</b> en la parte superior del chat. ¡Haz clic arriba del todo para verlo!\n"
+        "👉 Escribe #normas para leer las reglas rápidas del grupo.\n\n"
+        "¡Hagamos de esta una gran comunidad! 🚀"
+    )
+    kwargs = {"parse_mode": "HTML"}
+    if group_target["thread_id"]:
+        kwargs["message_thread_id"] = group_target["thread_id"]
+    return bot.send_message(chat_id=group_target["chat_id"], text=text, **kwargs).message_id
+
+def send_warning_message(bot, group_target, user, reasons):
+    mention = format_mention(user)
+    reasons_text = "\n".join([f"• {r}" for r in reasons])
+    text = (
+        f"⚠️ <b>¡ATENCIÓN {mention}! TU PERFIL NO CUMPLE LAS NORMAS</b> ⚠️\n\n"
+        "Para mantener el grupo seguro y ordenado, necesitamos que ajustes tu perfil:\n\n"
+        f"<b>Motivo:</b>\n{reasons_text}\n\n"
+        "<b>¿Cómo solucionarlo?</b>\n"
+        "1️⃣ Entra en los Ajustes de Telegram.\n"
+        "2️⃣ Ponte un <b>@alias / nombre de usuario</b>.\n"
+        "3️⃣ Pon un <b>nombre de perfil con al menos 3 letras reales</b>.\n\n"
+        "⏳ <b>Tienes 1 HORA para cambiarlo.</b> Si en 60 minutos no está corregido, el sistema te expulsará automáticamente (podrás volver a entrar en cuanto lo arregles)."
+    )
+    kwargs = {"parse_mode": "HTML"}
+    if group_target["thread_id"]:
+        kwargs["message_thread_id"] = group_target["thread_id"]
+    return bot.send_message(chat_id=group_target["chat_id"], text=text, **kwargs).message_id
+
+def process_moderation(bot, group_target, state):
+    if not group_target:
+        return
+
+    # 1. Procesar nuevos miembros que hayan entrado
+    last_update_id = state.get("last_update_id", 0)
+    try:
+        updates = bot.get_updates(offset=last_update_id + 1, timeout=5)
+        for u in updates:
+            state["last_update_id"] = u.update_id
+            if u.message and u.message.new_chat_members:
+                for member in u.message.new_chat_members:
+                    if member.is_bot:
+                        continue
+                    
+                    is_compliant, reasons = check_user_compliance(member)
+                    if is_compliant:
+                        send_standard_welcome(bot, group_target, member)
+                    else:
+                        msg_id = send_warning_message(bot, group_target, member, reasons)
+                        state["pending_users"][str(member.id)] = {
+                            "user_id": member.id,
+                            "joined_at": int(time.time()),
+                            "warning_msg_id": msg_id
+                        }
+    except Exception as e:
+        print(f"Error procesando nuevos miembros: {e}")
+
+    # 2. Revisar usuarios en lista de espera (Clock de 60 min)
+    now = int(time.time())
+    pending = state.get("pending_users", {})
+    to_remove = []
+
+    for user_id_str, pdata in list(pending.items()):
+        user_id = pdata["user_id"]
+        joined_at = pdata["joined_at"]
+        warning_msg_id = pdata["warning_msg_id"]
+
+        try:
+            chat_member = bot.get_chat_member(chat_id=group_target["chat_id"], user_id=user_id)
+            user = chat_member.user
+            
+            # Si el usuario abandonó el chat o fue expulsado previamente
+            if chat_member.status in ["left", "kicked"]:
+                to_remove.append(user_id_str)
+                continue
+
+            is_compliant, _ = check_user_compliance(user)
+
+            if is_compliant:
+                # El usuario cumplió las reglas
+                try:
+                    bot.delete_message(chat_id=group_target["chat_id"], message_id=warning_msg_id)
+                except Exception:
+                    pass
+                send_standard_welcome(bot, group_target, user)
+                to_remove.append(user_id_str)
+            elif now - joined_at >= 3600:
+                # Pasaron 60 minutos y sigue sin cumplir -> EXPULSIÓN (Kick sin ban)
+                try:
+                    bot.delete_message(chat_id=group_target["chat_id"], message_id=warning_msg_id)
+                except Exception:
+                    pass
+
+                try:
+                    bot.ban_chat_member(chat_id=group_target["chat_id"], user_id=user_id)
+                    bot.unban_chat_member(chat_id=group_target["chat_id"], user_id=user_id)
+                    print(f"Usuario {user_id} expulsado por no cumplir las normas tras 1 hora.")
+                except Exception as e:
+                    print(f"Error al expulsar usuario {user_id}: {e}")
+
+                to_remove.append(user_id_str)
+
+        except Exception as e:
+            print(f"Error comprobando usuario {user_id}: {e}")
+
+    for uid in to_remove:
+        if uid in state["pending_users"]:
+            del state["pending_users"][uid]
 
 def yt_get(url, params):
     params = dict(params)
@@ -269,57 +405,64 @@ def run_once():
     if ch_target: targets.append(ch_target)
     if gr_target: targets.append(gr_target)
 
-    if not targets:
-        raise RuntimeError("No se definió ningún destino (CHAT_ID_CHANNEL o CHAT_ID_GROUP)")
-
     state = load_state()
 
-    # 1. PROCESAR VÍDEOS / DIRECTOS
-    vids = get_recent_video_ids()
-    newest_vid = vids[0] if vids else None
-    if vids:
-        vids.reverse() 
-        for vid in vids:
-            info = yt_video_info(vid)
-            if not info: continue
+    # ========================================
+    # A. MODERACIÓN Y BIENVENIDAS DE USUARIOS
+    # ========================================
+    if gr_target:
+        process_moderation(bot, gr_target, state)
 
-            kind = "live" if info["is_live"] else "video"
-            stored = state["msg_ids"].get(vid)
+    # ========================================
+    # B. AVISOS DE YOUTUBE
+    # ========================================
+    if targets:
+        # 1. PROCESAR VÍDEOS / DIRECTOS
+        vids = get_recent_video_ids()
+        newest_vid = vids[0] if vids else None
+        if vids:
+            vids.reverse() 
+            for vid in vids:
+                info = yt_video_info(vid)
+                if not info: continue
+
+                kind = "live" if info["is_live"] else "video"
+                stored = state["msg_ids"].get(vid)
+                
+                if BASELINE_ONLY:
+                    if not stored:
+                        state["msg_ids"][vid] = -1
+                        state["vid_status"][vid] = kind
+                    continue
+
+                if not stored:
+                    mids = send_to_all_targets(bot, targets, info, kind, is_newest=(vid == newest_vid))
+                    state["msg_ids"][vid] = mids
+                    state["vid_status"][vid] = kind
+                elif stored != -1:
+                    old_kind = state["vid_status"].get(vid)
+                    if old_kind != kind:
+                        if isinstance(stored, dict):
+                            for t in targets:
+                                mid = stored.get(t["key"])
+                                if mid: update_single_msg(bot, t["chat_id"], mid, info, kind)
+                        elif isinstance(stored, int):
+                            update_single_msg(bot, targets[0]["chat_id"], stored, info, kind)
+                        state["vid_status"][vid] = kind
+
+        # 2. PROCESAR PUBLICACIONES (COMUNIDAD)
+        posts = get_recent_community_posts(CHANNEL_ID)
+        if posts:
+            latest_post = posts[0]
+            post_id = latest_post["vid"]
             
             if BASELINE_ONLY:
-                if not stored:
-                    state["msg_ids"][vid] = -1
-                    state["vid_status"][vid] = kind
-                continue
-
-            if not stored:
-                mids = send_to_all_targets(bot, targets, info, kind, is_newest=(vid == newest_vid))
-                state["msg_ids"][vid] = mids
-                state["vid_status"][vid] = kind
-            elif stored != -1:
-                old_kind = state["vid_status"].get(vid)
-                if old_kind != kind:
-                    if isinstance(stored, dict):
-                        for t in targets:
-                            mid = stored.get(t["key"])
-                            if mid: update_single_msg(bot, t["chat_id"], mid, info, kind)
-                    elif isinstance(stored, int):
-                        update_single_msg(bot, targets[0]["chat_id"], stored, info, kind)
-                    state["vid_status"][vid] = kind
-
-    # 2. PROCESAR PUBLICACIONES (COMUNIDAD)
-    posts = get_recent_community_posts(CHANNEL_ID)
-    if posts:
-        latest_post = posts[0]
-        post_id = latest_post["vid"]
-        
-        if BASELINE_ONLY:
-            if post_id not in state["msg_ids_posts"]:
-                state["msg_ids_posts"][post_id] = -1
-        else:
-            if post_id not in state["msg_ids_posts"]:
-                mids = send_to_all_targets(bot, targets, latest_post, "post")
-                state["msg_ids_posts"][post_id] = mids
+                if post_id not in state["msg_ids_posts"]:
+                    state["msg_ids_posts"][post_id] = -1
+            else:
+                if post_id not in state["msg_ids_posts"]:
+                    mids = send_to_all_targets(bot, targets, latest_post, "post")
+                    state["msg_ids_posts"][post_id] = mids
 
     save_state(state)
 
