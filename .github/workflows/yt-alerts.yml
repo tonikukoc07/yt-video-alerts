@@ -29,17 +29,15 @@ jobs:
       - name: Run bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID_GROUP: ${{ secrets.CHAT_ID_GROUP }}
-          CHAT_ID_CHANNEL: ${{ secrets.CHAT_ID_CHANNEL }}
-          YT_API_KEY: ${{ secrets.YT_API_KEY }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
-          WELCOME_THREAD_ID: ${{ secrets.WELCOME_THREAD_ID }}
+          CHAT_ID_GROUP: ${{ secrets.CHAT_ID_GROUP }}
+          CHAT_ID_POSTS: ${{ secrets.CHAT_ID_POSTS }}
           CHANNEL_ID_DIRECTO: ${{ secrets.CHANNEL_ID_DIRECTO }}
           CHAT_ID_GROUP_DIRECTO: ${{ secrets.CHAT_ID_GROUP_DIRECTO }}
-          SCAN_LIMIT: "15"
+          WELCOME_THREAD_ID: ${{ secrets.WELCOME_THREAD_ID }}
+          YT_API_KEY: ${{ secrets.YT_API_KEY }}
           TZ: "Europe/Madrid"
           PIN_LATEST: "1"
-          DELETE_LIVE_WHEN_FINALIZED: "1"
           BASELINE_ONLY: "0"
         run: |
           python main.py
