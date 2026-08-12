@@ -35,7 +35,13 @@
     "xO3OImidZCg": "video",
     "2TqXZv0jc8A": "video"
   },
-  "pending_users": {},
+  "pending_users": {
+    "8598675260": {
+      "user_id": 8598675260,
+      "joined_at": 1786539957,
+      "warning_msg_id": 5849
+    }
+  },
   "pending_welcomes": {},
-  "last_update_id": 808919019
+  "last_update_id": 808919020
 }
