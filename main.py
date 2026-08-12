@@ -13,11 +13,11 @@ STATE_FILE = "state.json"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID_CHANNEL_RAW = os.environ.get("CHAT_ID_CHANNEL", os.environ.get("CHAT_ID", ""))
 CHAT_ID_GROUP_RAW = os.environ.get("CHAT_ID_GROUP", "")
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "") # ID de YouTube Canal Principal
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "")
 
 # Variables de entorno - CANAL SECUNDARIO (DIRECTOS)
-CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO", "") # UCK4h49E7Bol5DD-szyOgFgQ
-CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO", "") # Hilo 5622
+CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO", "")
+CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO", "")
 
 YT_API_KEY = os.environ.get("YT_API_KEY", "")
 TZ = os.environ.get("TZ", "Europe/Madrid")
@@ -218,7 +218,7 @@ def process_moderation(bot, group_target, state):
         if uid in state["pending_users"]:
             del state["pending_users"][uid]
 
-    # 3. Eliminar mensajes de bienvenida tras 2 minutos
+    # 3. Eliminar mensajes de bienvenida tras 2 minutos (120 s)
     now = int(time.time())
     welcomes = state.get("pending_welcomes", {})
     welcomes_to_remove = []
@@ -254,7 +254,7 @@ def get_recent_video_ids(channel_id):
     if not channel_id: return []
     vids = []
 
-    # 1. RSS Feed
+    # 1. RSS Feed (Rápido para subidas y eventos inmediatos)
     try:
         rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
         r = requests.get(rss_url, timeout=15)
@@ -266,7 +266,7 @@ def get_recent_video_ids(channel_id):
     except Exception as e:
         print(f"Error obteniendo RSS de {channel_id}: {e}")
 
-    # 2. Respaldo por Playlist API
+    # 2. Respaldo por Playlist API (Lista UU...)
     playlist_id = "UU" + channel_id[2:]
     try:
         data = yt_get("https://www.googleapis.com/youtube/v3/playlistItems", {
@@ -280,6 +280,23 @@ def get_recent_video_ids(channel_id):
                 vids.append(vid)
     except Exception as e:
         print(f"Error obteniendo playlist del canal {channel_id}: {e}")
+
+    # 3. Búsqueda explícita de Directos en vivo (Para no perder transmisiones activas)
+    if YT_API_KEY:
+        try:
+            data_live = yt_get("https://www.googleapis.com/youtube/v3/search", {
+                "part": "snippet",
+                "channelId": channel_id,
+                "type": "video",
+                "eventType": "live",
+                "maxResults": 3
+            })
+            for item in data_live.get("items", []):
+                vid = item.get("id", {}).get("videoId")
+                if vid and vid not in vids:
+                    vids.append(vid)
+        except Exception as e:
+            print(f"Error buscando directos activos para {channel_id}: {e}")
 
     return vids
 
@@ -488,10 +505,12 @@ def process_channel_updates(bot, targets, channel_id, state):
                     state["vid_status"][vid] = kind
                 continue
 
+            # Publicación por primera vez
             if not stored:
                 mids = send_to_all_targets(bot, targets, info, kind, is_newest=(vid == newest_vid))
                 state["msg_ids"][vid] = mids
                 state["vid_status"][vid] = kind
+            # Si ya existía, comprobar si cambió de Directo -> Vídeo
             elif stored != -1:
                 old_kind = state["vid_status"].get(vid)
                 if old_kind != kind:
@@ -523,14 +542,14 @@ def run_once():
 
     state = load_state()
 
-    # Destinos Canal 1 (Canal principal + Pestaña Vídeos)
+    # Destinos Canal 1 (Canal principal)
     targets_main = []
     ch_target = parse_target(CHAT_ID_CHANNEL_RAW, "channel")
     gr_target = parse_target(CHAT_ID_GROUP_RAW, "group")
     if ch_target: targets_main.append(ch_target)
     if gr_target: targets_main.append(gr_target)
 
-    # Destinos Canal 2 (Directos -> Hilo 5622)
+    # Destinos Canal 2 (Canal de Directos -> Hilo 5622)
     targets_directo = []
     gr_directo_target = parse_target(CHAT_ID_GROUP_DIRECTO_RAW, "group_directo")
     if gr_directo_target: targets_directo.append(gr_directo_target)
