@@ -507,7 +507,11 @@
     "u79ANNh8i00": 542,
     "IZ4PoadTNGw": 544,
     "fVFswLrK1-E": 547,
-    "e4qdhic4Nts": 548
+    "e4qdhic4Nts": 548,
+    "f8k7tAhCoxY": {
+      "channel": 549,
+      "group": 5735
+    }
   },
   "pinned": {
     "message_id": 385,
@@ -603,7 +607,8 @@
     "u79ANNh8i00": "video",
     "IZ4PoadTNGw": "video",
     "fVFswLrK1-E": "live",
-    "e4qdhic4Nts": "live"
+    "e4qdhic4Nts": "live",
+    "f8k7tAhCoxY": "live"
   },
   "community_posts": {
     "UgkxQe-cbbpBhWObs1Z_bVh8WAqemXtHMnPv": 506,
