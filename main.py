@@ -23,8 +23,11 @@ CHAT_ID_POSTS_RAW = os.environ.get("CHAT_ID_POSTS") or "-1003839040942_5801" # P
 CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO") or "UCK4h49E7Bol5DD-szyOgFgQ"
 CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO") or "-1003839040942_5622" # Vídeos/Directos Ch2
 
-# Hilo para Bienvenidas / General (Acepta "1" o "-1003839040942_1")
+# Hilo para Bienvenidas / General
 WELCOME_THREAD_ID_RAW = os.environ.get("WELCOME_THREAD_ID") or "1"
+
+# Canal de Registros / Logs
+LOG_CHAT_ID_RAW = os.environ.get("LOG_CHAT_ID") or "-1003781665410"
 
 YT_API_KEY = os.environ.get("YT_API_KEY", "")
 TZ = os.environ.get("TZ", "Europe/Madrid")
@@ -104,6 +107,17 @@ def send_telegram_msg(bot, chat_id, text, thread_id=None, parse_mode="HTML"):
     msg = bot.send_message(chat_id=chat_id, text=text, **kwargs)
     return msg.message_id
 
+def send_log(bot, text):
+    """Envía un reporte de actividad al canal de logs privado."""
+    log_target = parse_target(LOG_CHAT_ID_RAW, "log_channel")
+    if not log_target:
+        return
+    try:
+        log_text = f"🤖 <b>LOG BOT PRO:</b>\n{text}"
+        send_telegram_msg(bot, log_target["chat_id"], log_text, thread_id=log_target.get("thread_id"))
+    except Exception as e:
+        print(f"Error enviando mensaje de log: {e}")
+
 # ==========================================================
 # MODERACIÓN Y BIENVENIDAS DE TELEGRAM
 # ==========================================================
@@ -167,19 +181,16 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
             timeout=5,
             allowed_updates=["message", "chat_member"]
         )
-        print(f"🔍 Moderación: Recibidas {len(updates)} actualizaciones de Telegram.")
 
         for u in updates:
             state["last_update_id"] = u.update_id
             new_members = []
 
-            # Opción A: Mensaje estándar de entrada
             if u.message and u.message.new_chat_members:
                 for m in u.message.new_chat_members:
                     if not m.is_bot:
                         new_members.append(m)
 
-            # Opción B: Evento chat_member (enlaces de invitación)
             if u.chat_member and u.chat_member.new_chat_member:
                 cm = u.chat_member.new_chat_member
                 user = getattr(cm, 'user', None) or getattr(u.chat_member, 'user', None)
@@ -191,7 +202,6 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
 
             for member in new_members:
                 try:
-                    print(f"👤 Detectado nuevo miembro: {member.first_name} (ID: {member.id})")
                     is_compliant, reasons = check_user_compliance(member)
                     if is_compliant:
                         msg_id = send_standard_welcome(bot, group_target, member, thread_id=welcome_thread_id)
@@ -199,7 +209,7 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
                             "msg_id": msg_id,
                             "sent_at": int(time.time())
                         }
-                        print(f"✅ Enviada bienvenida estándar (Msg ID: {msg_id})")
+                        send_log(bot, f"✅ Bienvenida enviada a {format_mention(member)} (Perfil correcto).")
                     else:
                         msg_id = send_warning_message(bot, group_target, member, reasons, thread_id=welcome_thread_id)
                         state["pending_users"][str(member.id)] = {
@@ -207,7 +217,7 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
                             "joined_at": int(time.time()),
                             "warning_msg_id": msg_id
                         }
-                        print(f"⚠️ Enviado aviso de perfil incompleto (Msg ID: {msg_id})")
+                        send_log(bot, f"⚠️ Aviso enviado a {format_mention(member)} por incumplir normas (60 min restantes).")
                 except Exception as ex_m:
                     print(f"Error procesando bienvenida individual: {ex_m}")
 
@@ -244,6 +254,7 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
                     "msg_id": msg_id,
                     "sent_at": int(time.time())
                 }
+                send_log(bot, f"🎉 El usuario {format_mention(user)} ha corregido su perfil a tiempo.")
                 to_remove.append(user_id_str)
             elif now - joined_at >= 3600:
                 try:
@@ -254,7 +265,7 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
                 try:
                     bot.ban_chat_member(chat_id=group_target["chat_id"], user_id=user_id)
                     bot.unban_chat_member(chat_id=group_target["chat_id"], user_id=user_id)
-                    print(f"Usuario {user_id} expulsado por no cumplir las normas.")
+                    send_log(bot, f"🚫 Usuario <code>{user_id}</code> expulsado tras 60 min sin corregir su perfil.")
                 except Exception as e:
                     print(f"Error al expulsar usuario {user_id}: {e}")
 
@@ -282,7 +293,6 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
 
         try:
             bot.delete_message(chat_id=group_target["chat_id"], message_id=msg_id)
-            print(f"🗑️ Bienvenida {msg_id} eliminada tras 2 minutos.")
         except Exception as e:
             print(f"Error borrando mensaje de bienvenida {msg_id}: {e}")
 
@@ -542,6 +552,7 @@ def process_channel_videos(bot, target, channel_id, state):
                 mid = send_post(bot, target, info, kind)
                 state["msg_ids"][vid] = mid
                 state["vid_status"][vid] = kind
+                send_log(bot, f"📢 Alerta de contenido publicada: <b>{info['title']}</b> ({kind.upper()}).")
 
                 if PIN_LATEST and vid == newest_vid:
                     try:
@@ -560,6 +571,7 @@ def process_channel_videos(bot, target, channel_id, state):
                     if actual_mid:
                         if update_msg(bot, target, actual_mid, info, kind):
                             state["vid_status"][vid] = kind
+                            send_log(bot, f"🔄 Estado de vídeo actualizado: <b>{info['title']}</b> pasó de {old_kind} a {kind}.")
 
 def process_channel_posts(bot, target, channel_id, state):
     if not target or not channel_id:
@@ -577,6 +589,7 @@ def process_channel_posts(bot, target, channel_id, state):
             if post_id not in state["msg_ids_posts"]:
                 mid = send_post(bot, target, latest_post, "post")
                 state["msg_ids_posts"][post_id] = mid
+                send_log(bot, f"💬 Nueva publicación de comunidad enviada.")
 
 # ==========================================================
 # EJECUCIÓN PRINCIPAL
