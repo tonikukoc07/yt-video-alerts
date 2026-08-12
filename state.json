@@ -7,7 +7,11 @@
     "IZ4PoadTNGw": -1
   },
   "msg_ids_posts": {
-    "UgkxowmHUqsPded4vO4VZ_tpzy4fF8oXNrKm": -1
+    "UgkxowmHUqsPded4vO4VZ_tpzy4fF8oXNrKm": -1,
+    "UgkxxQcZcyryNMvWyDpOY5GwFEfObK6uk1v8": {
+      "channel": 551,
+      "group": 5800
+    }
   },
   "vid_status": {
     "JmN2TupXad4": "video",
