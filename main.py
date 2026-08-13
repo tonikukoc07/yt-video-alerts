@@ -13,19 +13,19 @@ from telegram import Bot, InputMediaPhoto
 STATE_FILE = "state.json"
 
 # ==========================================================
-# CONFIGURACIÓN Y VARIABLES DE ENTORNO
+# CONFIGURACIÓN (100% DESDE VARIABLES DE ENTORNO EN RENDER)
 # ==========================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 
-CHANNEL_ID = os.environ.get("CHANNEL_ID") or "UC6efY3r4Oiy0ns4ZEAVw4_A"
-CHAT_ID_GROUP_RAW = os.environ.get("CHAT_ID_GROUP") or "-1003839040942_5621"
-CHAT_ID_POSTS_RAW = os.environ.get("CHAT_ID_POSTS") or "-1003839040942_5801"
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "")
+CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO", "")
 
-CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO") or "UCK4h49E7Bol5DD-szyOgFgQ"
-CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO") or "-1003839040942_5622"
+CHAT_ID_GROUP_RAW = os.environ.get("CHAT_ID_GROUP", "")
+CHAT_ID_POSTS_RAW = os.environ.get("CHAT_ID_POSTS", "")
+CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO", "")
 
-WELCOME_THREAD_ID_RAW = os.environ.get("WELCOME_THREAD_ID") or ""
-LOG_CHAT_ID_RAW = os.environ.get("LOG_CHAT_ID") or "-1003781665410"
+WELCOME_THREAD_ID_RAW = os.environ.get("WELCOME_THREAD_ID", "")
+LOG_CHAT_ID_RAW = os.environ.get("LOG_CHAT_ID", "")
 
 YT_API_KEY = os.environ.get("YT_API_KEY", "")
 TZ = os.environ.get("TZ", "Europe/Madrid")
@@ -36,7 +36,7 @@ BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
 PROCESSED_USERS_CACHE = {}
 
 # ==========================================================
-# SERVIDOR WEB DUMMY PARA RENDER FREE
+# SERVIDOR WEB PARA MANTENER RENDER ACTIVO
 # ==========================================================
 app = Flask(__name__)
 
@@ -53,7 +53,7 @@ def run_flask():
 # ==========================================================
 def must_env(name, value):
     if not value:
-        raise RuntimeError(f"Missing env var: {name}")
+        raise RuntimeError(f"Falta la variable de entorno obligatoria: {name}")
 
 def parse_target(raw_str, key_name="default"):
     if not raw_str:
@@ -185,14 +185,14 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
         return
 
     now = int(time.time())
-    actual_thread_id = welcome_thread_id if welcome_thread_id is not None else group_target.get("thread_id")
+    actual_thread_id = welcome_thread_id
 
-    # Limpieza de memoria
+    # Limpieza de memoria (10 min)
     for uid, ts in list(PROCESSED_USERS_CACHE.items()):
         if now - ts > 600:
             del PROCESSED_USERS_CACHE[uid]
 
-    # 1. RECUPERAR ACTUALIZACIONES DE TELEGRAM
+    # 1. ACTUALIZACIONES EN TIEMPO REAL
     last_update_id = state.get("last_update_id", 0)
     try:
         updates = await bot.get_updates(
@@ -258,7 +258,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
     except Exception as e:
         print(f"Error en actualizaciones de Telegram: {e}", flush=True)
 
-    # 2. COMPROBACIÓN DE TEMPORIZADORES (SE EJECUTA SIEMPRE EN CADA CICLO)
+    # 2. SEGUIMIENTO DE USUARIOS CON ADVERTENCIA (60 MINUTOS)
     pending = state.get("pending_users", {})
     to_remove = []
 
@@ -311,7 +311,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
         if uid in state["pending_users"]:
             del state["pending_users"][uid]
 
-    # 3. BORRADO AUTOMÁTICO DE MENSAJES DE BIENVENIDA (2 MINUTOS = 120 SEGUNDOS)
+    # 3. AUTO-DESTRUCCIÓN DE BIENVENIDAS CORRECTAS (120 SEGUNDOS)
     welcomes = state.get("pending_welcomes", {})
     welcomes_to_remove = []
 
@@ -605,6 +605,8 @@ async def process_channel_posts(bot, target, channel_id, state):
 # ==========================================================
 async def main_loop():
     must_env("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
+    must_env("YT_API_KEY", YT_API_KEY)
+
     async with Bot(token=TELEGRAM_TOKEN) as bot:
         state = load_state()
 
