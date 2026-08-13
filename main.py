@@ -177,6 +177,8 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
         return
 
     last_update_id = state.get("last_update_id", 0)
+    processed_user_ids = set()
+
     try:
         updates = bot.get_updates(
             offset=last_update_id + 1 if last_update_id > 0 else None,
@@ -186,12 +188,12 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
 
         for u in updates:
             state["last_update_id"] = u.update_id
-            new_members = []
+            candidates = []
 
             if u.message and u.message.new_chat_members:
                 for m in u.message.new_chat_members:
                     if not m.is_bot:
-                        new_members.append(m)
+                        candidates.append(m)
 
             if u.chat_member and u.chat_member.new_chat_member:
                 cm = u.chat_member.new_chat_member
@@ -199,10 +201,17 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
                 if user and not user.is_bot:
                     status = getattr(cm, 'status', '')
                     if status in ["member", "administrator", "creator"]:
-                        if user not in new_members:
-                            new_members.append(user)
+                        candidates.append(user)
 
-            for member in new_members:
+            for member in candidates:
+                # Filtrar duplicados: evitar procesar al mismo usuario 2 veces en la misma ráfaga
+                if member.id in processed_user_ids:
+                    continue
+                if str(member.id) in state.get("pending_users", {}):
+                    continue
+
+                processed_user_ids.add(member.id)
+
                 try:
                     is_compliant, reasons = check_user_compliance(member)
                     if is_compliant:
