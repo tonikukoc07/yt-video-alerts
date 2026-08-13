@@ -32,7 +32,7 @@ TZ = os.environ.get("TZ", "Europe/Madrid")
 PIN_LATEST = os.environ.get("PIN_LATEST", "1") == "1"
 BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
 
-# Cache global anti-duplicados en memoria (user_id -> timestamp)
+# Caché temporal en memoria
 PROCESSED_USERS_CACHE = {}
 
 # ==========================================================
@@ -94,7 +94,7 @@ def load_state():
             st = {}
     if not isinstance(st, dict):
         st = {}
-    for key in ["msg_ids", "msg_ids_posts", "vid_status", "pending_users", "pending_welcomes"]:
+    for key in ["msg_ids", "msg_ids_posts", "vid_status", "pending_users", "pending_welcomes", "processed_welcome_users"]:
         if not isinstance(st.get(key), dict): st[key] = {}
     if "last_update_id" not in st or not isinstance(st["last_update_id"], int):
         st["last_update_id"] = 0
@@ -112,7 +112,7 @@ async def send_telegram_msg(bot, chat_id, text, thread_id=None, parse_mode="HTML
             msg = await bot.send_message(chat_id=chat_id, text=text, **kwargs)
             return msg.message_id
         except Exception as e:
-            print(f"Aviso: No se pudo enviar con thread_id={thread_id} ({e}).")
+            print(f"Aviso: No se pudo enviar con thread_id={thread_id} ({e}).", flush=True)
 
     kwargs.pop("message_thread_id", None)
     msg = await bot.send_message(chat_id=chat_id, text=text, **kwargs)
@@ -126,7 +126,7 @@ async def send_log(bot, text):
         log_text = f"🤖 <b>LOG BOT PRO:</b>\n{text}"
         await send_telegram_msg(bot, log_target["chat_id"], log_text, thread_id=log_target.get("thread_id"))
     except Exception as e:
-        print(f"Error enviando log: {e}")
+        print(f"Error enviando log: {e}", flush=True)
 
 # ==========================================================
 # MODERACIÓN Y BIENVENIDAS DE TELEGRAM
@@ -186,6 +186,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=1):
 
     now = int(time.time())
 
+    # Limpieza de memoria
     for uid, ts in list(PROCESSED_USERS_CACHE.items()):
         if now - ts > 600:
             del PROCESSED_USERS_CACHE[uid]
@@ -198,9 +199,12 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=1):
             allowed_updates=["message", "chat_member"]
         )
 
+        if not updates:
+            return
+
         candidates = []
         for u in updates:
-            state["last_update_id"] = u.update_id
+            state["last_update_id"] = max(state.get("last_update_id", 0), u.update_id)
 
             if u.message and u.message.new_chat_members:
                 for m in u.message.new_chat_members:
@@ -215,18 +219,24 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=1):
                     if status in ["member", "administrator", "creator"]:
                         candidates.append(user)
 
-        seen_in_batch = set()
-        for member in candidates:
-            if member.id in seen_in_batch:
-                continue
-            seen_in_batch.add(member.id)
+        # Filtrar duplicados dentro de la misma ráfaga de actualizaciones
+        unique_members = {}
+        for m in candidates:
+            if m.id not in unique_members:
+                unique_members[m.id] = m
 
-            if member.id in PROCESSED_USERS_CACHE:
-                continue
-            if str(member.id) in state.get("pending_users", {}):
+        processed_users = state.setdefault("processed_welcome_users", {})
+
+        for member_id, member in unique_members.items():
+            m_str = str(member_id)
+
+            # Si ya fue procesado antes (en estado o en caché), se descarta totalmente
+            if m_str in processed_users or m_str in state.get("pending_users", {}) or member_id in PROCESSED_USERS_CACHE:
                 continue
 
-            PROCESSED_USERS_CACHE[member.id] = now
+            # Marcar inmediatamente antes de realizar llamadas asíncronas
+            PROCESSED_USERS_CACHE[member_id] = now
+            processed_users[m_str] = now
 
             try:
                 is_compliant, reasons = check_user_compliance(member)
@@ -237,20 +247,25 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=1):
                         "sent_at": int(time.time())
                     }
                     await send_log(bot, f"✅ Bienvenida enviada a {format_mention(member)} (Perfil correcto).")
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Bienvenida enviada a {member.id}", flush=True)
                 else:
                     msg_id = await send_warning_message(bot, group_target, member, reasons, thread_id=welcome_thread_id)
-                    state["pending_users"][str(member.id)] = {
+                    state["pending_users"][m_str] = {
                         "user_id": member.id,
                         "joined_at": int(time.time()),
                         "warning_msg_id": msg_id
                     }
                     await send_log(bot, f"⚠️ Aviso enviado a {format_mention(member)} por incumplir normas (60 min restantes).")
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Aviso enviado a {member.id}", flush=True)
             except Exception as ex_m:
-                print(f"Error procesando bienvenida: {ex_m}")
+                print(f"Error procesando bienvenida: {ex_m}", flush=True)
+
+        save_state(state)
 
     except Exception as e:
-        print(f"Error en actualizaciones de Telegram: {e}")
+        print(f"Error en actualizaciones de Telegram: {e}", flush=True)
 
+    # Comprobación de usuarios pendientes (expulsiones tras 60 minutos)
     pending = state.get("pending_users", {})
     to_remove = []
 
@@ -292,17 +307,18 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=1):
                     await bot.unban_chat_member(chat_id=group_target["chat_id"], user_id=user_id)
                     await send_log(bot, f"🚫 Usuario <code>{user_id}</code> expulsado tras 60 min sin corregir su perfil.")
                 except Exception as e:
-                    print(f"Error al expulsar usuario: {e}")
+                    print(f"Error al expulsar usuario: {e}", flush=True)
 
                 to_remove.append(user_id_str)
 
         except Exception as e:
-            print(f"Error comprobando usuario {user_id}: {e}")
+            print(f"Error comprobando usuario {user_id}: {e}", flush=True)
 
     for uid in to_remove:
         if uid in state["pending_users"]:
             del state["pending_users"][uid]
 
+    # Borrado de bienvenida transcurridos 2 minutos (120 segundos)
     welcomes = state.get("pending_welcomes", {})
     welcomes_to_remove = []
 
@@ -315,7 +331,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=1):
             try:
                 await bot.delete_message(chat_id=group_target["chat_id"], message_id=msg_id)
             except Exception as e:
-                print(f"Error borrando mensaje de bienvenida {msg_id}: {e}")
+                print(f"Error borrando mensaje de bienvenida {msg_id}: {e}", flush=True)
             welcomes_to_remove.append(msg_id_str)
 
     for wid in welcomes_to_remove:
@@ -506,7 +522,7 @@ async def send_post(bot, target, info, kind):
             msg = await bot.send_photo(chat_id=target["chat_id"], photo=r.content, caption=cap, **kwargs)
             return msg.message_id
         except Exception as e:
-            print(f"Error enviando foto a {target['chat_id']}: {e}")
+            print(f"Error enviando foto a {target['chat_id']}: {e}", flush=True)
 
     msg = await bot.send_message(chat_id=target["chat_id"], text=cap, **kwargs)
     return msg.message_id
@@ -561,7 +577,7 @@ async def process_channel_videos(bot, target, channel_id, state):
                             await bot.unpin_all_chat_messages(chat_id=target["chat_id"])
                         await bot.pin_chat_message(chat_id=target["chat_id"], message_id=mid, disable_notification=True)
                     except Exception as e:
-                        print(f"Error al fijar mensaje: {e}")
+                        print(f"Error al fijar mensaje: {e}", flush=True)
 
             elif mid != -1:
                 old_kind = state["vid_status"].get(vid)
@@ -603,7 +619,7 @@ async def main_loop():
         target_ch2_vids = parse_target(CHAT_ID_GROUP_DIRECTO_RAW, "ch2_vids")
         welcome_thread_id = parse_thread_id(WELCOME_THREAD_ID_RAW)
 
-        print("🚀 Bot en vivo escuchando en tiempo real...")
+        print("🚀 Bot en vivo escuchando en tiempo real...", flush=True)
 
         last_yt_check = 0
 
@@ -625,7 +641,7 @@ async def main_loop():
                 save_state(state)
 
             except Exception as e:
-                print(f"Error en bucle principal: {e}")
+                print(f"Error en bucle principal: {e}", flush=True)
 
             await asyncio.sleep(2)
 
