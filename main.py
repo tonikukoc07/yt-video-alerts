@@ -13,19 +13,19 @@ from telegram import Bot, InputMediaPhoto
 STATE_FILE = "state.json"
 
 # ==========================================================
-# CONFIGURACIÓN (100% DESDE VARIABLES DE ENTORNO EN RENDER)
+# CONFIGURACIÓN Y VARIABLES DE ENTORNO
 # ==========================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "")
-CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO", "")
+CHANNEL_ID = os.environ.get("CHANNEL_ID") or "UC6efY3r4Oiy0ns4ZEAVw4_A"
+CHAT_ID_GROUP_RAW = os.environ.get("CHAT_ID_GROUP") or "-1003839040942_5621"
+CHAT_ID_POSTS_RAW = os.environ.get("CHAT_ID_POSTS") or "-1003839040942_5801"
 
-CHAT_ID_GROUP_RAW = os.environ.get("CHAT_ID_GROUP", "")
-CHAT_ID_POSTS_RAW = os.environ.get("CHAT_ID_POSTS", "")
-CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO", "")
+CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO") or "UCK4h49E7Bol5DD-szyOgFgQ"
+CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO") or "-1003839040942_5622"
 
 WELCOME_THREAD_ID_RAW = os.environ.get("WELCOME_THREAD_ID", "")
-LOG_CHAT_ID_RAW = os.environ.get("LOG_CHAT_ID", "")
+LOG_CHAT_ID_RAW = os.environ.get("LOG_CHAT_ID") or "-1003781665410"
 
 YT_API_KEY = os.environ.get("YT_API_KEY", "")
 TZ = os.environ.get("TZ", "Europe/Madrid")
@@ -36,7 +36,7 @@ BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
 PROCESSED_USERS_CACHE = {}
 
 # ==========================================================
-# SERVIDOR WEB PARA MANTENER RENDER ACTIVO
+# SERVIDOR WEB DUMMY PARA RENDER FREE
 # ==========================================================
 app = Flask(__name__)
 
@@ -53,7 +53,7 @@ def run_flask():
 # ==========================================================
 def must_env(name, value):
     if not value:
-        raise RuntimeError(f"Falta la variable de entorno obligatoria: {name}")
+        raise RuntimeError(f"Missing env var: {name}")
 
 def parse_target(raw_str, key_name="default"):
     if not raw_str:
@@ -112,7 +112,7 @@ async def send_telegram_msg(bot, chat_id, text, thread_id=None, parse_mode="HTML
             msg = await bot.send_message(chat_id=chat_id, text=text, **kwargs)
             return msg.message_id
         except Exception as e:
-            print(f"Aviso: No se pudo enviar con thread_id={thread_id} ({e}). Enviando al chat principal.", flush=True)
+            print(f"Aviso: No se pudo enviar con thread_id={thread_id} ({e}). Enviando al canal principal.", flush=True)
 
     kwargs.pop("message_thread_id", None)
     msg = await bot.send_message(chat_id=chat_id, text=text, **kwargs)
@@ -178,7 +178,20 @@ async def send_warning_message(bot, group_target, user, reasons, thread_id=None)
         "3️⃣ Pon un <b>nombre de perfil con al menos 3 letras reales</b>.\n\n"
         "⏳ <b>Tienes 1 HORA para cambiarlo.</b> Si en 60 minutos no está corregido, el sistema te expulsará automáticamente (podrás volver a entrar en cuanto lo arregles)."
     )
-    return await send_telegram_msg(bot, group_target["chat_id"], text, thread_id=thread_id)
+    return await send_warning_msg_to_chat(bot, group_target["chat_id"], text, thread_id=thread_id)
+
+async def send_warning_msg_to_chat(bot, chat_id, text, thread_id=None):
+    kwargs = {"parse_mode": "HTML"}
+    if thread_id is not None:
+        try:
+            kwargs["message_thread_id"] = thread_id
+            msg = await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+            return msg.message_id
+        except Exception:
+            pass
+    kwargs.pop("message_thread_id", None)
+    msg = await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+    return msg.message_id
 
 async def process_moderation(bot, group_target, state, welcome_thread_id=None):
     if not group_target:
@@ -187,12 +200,14 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
     now = int(time.time())
     actual_thread_id = welcome_thread_id
 
-    # Limpieza de memoria (10 min)
+    # Limpieza de memoria
     for uid, ts in list(PROCESSED_USERS_CACHE.items()):
         if now - ts > 600:
             del PROCESSED_USERS_CACHE[uid]
 
-    # 1. ACTUALIZACIONES EN TIEMPO REAL
+    pending = state.get("pending_users", {})
+
+    # 1. ACTUALIZACIONES DE TELEGRAM Y LECTURA DE MENSAJES EN TIEMPO REAL
     last_update_id = state.get("last_update_id", 0)
     try:
         updates = await bot.get_updates(
@@ -206,6 +221,28 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
             for u in updates:
                 state["last_update_id"] = max(state.get("last_update_id", 0), u.update_id)
 
+                # Si un usuario en lista de aviso escribe un mensaje, evaluamos su perfil inmediatamente
+                if u.message and u.message.from_user:
+                    sender = u.message.from_user
+                    s_str = str(sender.id)
+                    if s_str in pending:
+                        is_comp, _ = check_user_compliance(sender)
+                        if is_comp:
+                            w_msg_id = pending[s_str]["warning_msg_id"]
+                            try:
+                                await bot.delete_message(chat_id=group_target["chat_id"], message_id=w_msg_id)
+                            except Exception:
+                                pass
+                            msg_id = await send_standard_welcome(bot, group_target, sender, thread_id=actual_thread_id)
+                            state["pending_welcomes"][str(msg_id)] = {
+                                "msg_id": msg_id,
+                                "sent_at": int(time.time())
+                            }
+                            await send_log(bot, f"🎉 El usuario {format_mention(sender)} ha corregido su perfil a tiempo.")
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🎉 Usuario {sender.id} corregido tras escribir mensaje.", flush=True)
+                            del pending[s_str]
+
+                # Detección de nuevos miembros
                 if u.message and u.message.new_chat_members:
                     for m in u.message.new_chat_members:
                         if not m.is_bot:
@@ -225,7 +262,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
             for member_id, member in unique_members.items():
                 m_str = str(member_id)
 
-                if m_str in processed_users or m_str in state.get("pending_users", {}) or member_id in PROCESSED_USERS_CACHE:
+                if m_str in processed_users or m_str in pending or member_id in PROCESSED_USERS_CACHE:
                     continue
 
                 PROCESSED_USERS_CACHE[member_id] = now
@@ -243,7 +280,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Bienvenida enviada a {member.id}", flush=True)
                     else:
                         msg_id = await send_warning_message(bot, group_target, member, reasons, thread_id=actual_thread_id)
-                        state["pending_users"][m_str] = {
+                        pending[m_str] = {
                             "user_id": member.id,
                             "joined_at": int(time.time()),
                             "warning_msg_id": msg_id
@@ -258,8 +295,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
     except Exception as e:
         print(f"Error en actualizaciones de Telegram: {e}", flush=True)
 
-    # 2. SEGUIMIENTO DE USUARIOS CON ADVERTENCIA (60 MINUTOS)
-    pending = state.get("pending_users", {})
+    # 2. TEMPORIZADOR DE EXPULSIÓN Y COMPROBACIÓN AUTOMÁTICA
     to_remove = []
 
     for user_id_str, pdata in list(pending.items()):
@@ -288,6 +324,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
                     "sent_at": int(time.time())
                 }
                 await send_log(bot, f"🎉 El usuario {format_mention(user)} ha corregido su perfil a tiempo.")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 🎉 Usuario {user_id} corregido automáticamente.", flush=True)
                 to_remove.append(user_id_str)
             elif now - joined_at >= 3600:
                 try:
@@ -311,7 +348,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
         if uid in state["pending_users"]:
             del state["pending_users"][uid]
 
-    # 3. AUTO-DESTRUCCIÓN DE BIENVENIDAS CORRECTAS (120 SEGUNDOS)
+    # 3. BORRADO AUTOMÁTICO DE BIENVENIDAS (2 MINUTOS = 120 SEGUNDOS)
     welcomes = state.get("pending_welcomes", {})
     welcomes_to_remove = []
 
@@ -605,8 +642,6 @@ async def process_channel_posts(bot, target, channel_id, state):
 # ==========================================================
 async def main_loop():
     must_env("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
-    must_env("YT_API_KEY", YT_API_KEY)
-
     async with Bot(token=TELEGRAM_TOKEN) as bot:
         state = load_state()
 
