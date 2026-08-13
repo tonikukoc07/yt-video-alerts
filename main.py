@@ -5,6 +5,8 @@ import requests
 import io
 import re
 from datetime import datetime
+from threading import Thread
+from flask import Flask
 from telegram import Bot, InputMediaPhoto
 
 STATE_FILE = "state.json"
@@ -29,6 +31,25 @@ TZ = os.environ.get("TZ", "Europe/Madrid")
 PIN_LATEST = os.environ.get("PIN_LATEST", "1") == "1"
 BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
 
+# Cache global anti-duplicados en memoria (user_id -> timestamp)
+PROCESSED_USERS_CACHE = {}
+
+# ==========================================================
+# SERVIDOR WEB DUMMY PARA RENDER FREE
+# ==========================================================
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return "Bot en vivo 24/7", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
+# ==========================================================
+# FUNCIONES AUXILIARES Y ESTADO
+# ==========================================================
 def must_env(name, value):
     if not value:
         raise RuntimeError(f"Missing env var: {name}")
@@ -106,6 +127,9 @@ def send_log(bot, text):
     except Exception as e:
         print(f"Error enviando log: {e}")
 
+# ==========================================================
+# MODERACIÓN Y BIENVENIDAS DE TELEGRAM
+# ==========================================================
 def check_user_compliance(user):
     reasons = []
     has_username = bool(user.username)
@@ -159,9 +183,14 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
     if not group_target:
         return
 
-    last_update_id = state.get("last_update_id", 0)
-    processed_user_ids = set()
+    now = int(time.time())
 
+    # Limpiar caché antigua (más de 10 minutos)
+    for uid, ts in list(PROCESSED_USERS_CACHE.items()):
+        if now - ts > 600:
+            del PROCESSED_USERS_CACHE[uid]
+
+    last_update_id = state.get("last_update_id", 0)
     try:
         updates = bot.get_updates(
             offset=last_update_id + 1 if last_update_id > 0 else None,
@@ -169,9 +198,9 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
             allowed_updates=["message", "chat_member"]
         )
 
+        candidates = []
         for u in updates:
             state["last_update_id"] = u.update_id
-            candidates = []
 
             if u.message and u.message.new_chat_members:
                 for m in u.message.new_chat_members:
@@ -186,39 +215,45 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
                     if status in ["member", "administrator", "creator"]:
                         candidates.append(user)
 
-            for member in candidates:
-                if member.id in processed_user_ids:
-                    continue
-                if str(member.id) in state.get("pending_users", {}):
-                    continue
+        # Filtrar duplicados estrictamente
+        seen_in_batch = set()
+        for member in candidates:
+            if member.id in seen_in_batch:
+                continue
+            seen_in_batch.add(member.id)
 
-                processed_user_ids.add(member.id)
+            # Evitar procesar si ya está en caché reciente o en usuarios pendientes
+            if member.id in PROCESSED_USERS_CACHE:
+                continue
+            if str(member.id) in state.get("pending_users", {}):
+                continue
 
-                try:
-                    is_compliant, reasons = check_user_compliance(member)
-                    if is_compliant:
-                        msg_id = send_standard_welcome(bot, group_target, member, thread_id=welcome_thread_id)
-                        state["pending_welcomes"][str(msg_id)] = {
-                            "msg_id": msg_id,
-                            "sent_at": int(time.time())
-                        }
-                        send_log(bot, f"✅ Bienvenida enviada a {format_mention(member)} (Perfil correcto).")
-                    else:
-                        msg_id = send_warning_message(bot, group_target, member, reasons, thread_id=welcome_thread_id)
-                        state["pending_users"][str(member.id)] = {
-                            "user_id": member.id,
-                            "joined_at": int(time.time()),
-                            "warning_msg_id": msg_id
-                        }
-                        send_log(bot, f"⚠️ Aviso enviado a {format_mention(member)} por incumplir normas (60 min restantes).")
-                except Exception as ex_m:
-                    print(f"Error en bienvenida: {ex_m}")
+            PROCESSED_USERS_CACHE[member.id] = now
+
+            try:
+                is_compliant, reasons = check_user_compliance(member)
+                if is_compliant:
+                    msg_id = send_standard_welcome(bot, group_target, member, thread_id=welcome_thread_id)
+                    state["pending_welcomes"][str(msg_id)] = {
+                        "msg_id": msg_id,
+                        "sent_at": int(time.time())
+                    }
+                    send_log(bot, f"✅ Bienvenida enviada a {format_mention(member)} (Perfil correcto).")
+                else:
+                    msg_id = send_warning_message(bot, group_target, member, reasons, thread_id=welcome_thread_id)
+                    state["pending_users"][str(member.id)] = {
+                        "user_id": member.id,
+                        "joined_at": int(time.time()),
+                        "warning_msg_id": msg_id
+                    }
+                    send_log(bot, f"⚠️ Aviso enviado a {format_mention(member)} por incumplir normas (60 min restantes).")
+            except Exception as ex_m:
+                print(f"Error procesando bienvenida: {ex_m}")
 
     except Exception as e:
         print(f"Error en actualizaciones de Telegram: {e}")
 
-    # Expulsión tras 60 minutos
-    now = int(time.time())
+    # Expulsión tras 60 minutos si no cumplen las normas
     pending = state.get("pending_users", {})
     to_remove = []
 
@@ -271,8 +306,7 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
         if uid in state["pending_users"]:
             del state["pending_users"][uid]
 
-    # Borrado de bienvenida a los 2 minutos
-    now = int(time.time())
+    # Borrado de bienvenida a los 2 minutos (120 s)
     welcomes = state.get("pending_welcomes", {})
     welcomes_to_remove = []
 
@@ -292,6 +326,9 @@ def process_moderation(bot, group_target, state, welcome_thread_id=1):
         if wid in state["pending_welcomes"]:
             del state["pending_welcomes"][wid]
 
+# ==========================================================
+# FUNCIONES YOUTUBE Y ENVÍO DE AVISOS
+# ==========================================================
 def yt_get(url, params):
     params = dict(params)
     params["key"] = YT_API_KEY
@@ -558,7 +595,7 @@ def process_channel_posts(bot, target, channel_id, state):
                 send_log(bot, f"💬 Nueva publicación de comunidad enviada.")
 
 # ==========================================================
-# BUCLE CONTINUO (TIEMPO REAL)
+# BUCLE PRINCIPAL
 # ==========================================================
 def main_loop():
     must_env("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
@@ -570,17 +607,15 @@ def main_loop():
     target_ch2_vids = parse_target(CHAT_ID_GROUP_DIRECTO_RAW, "ch2_vids")
     welcome_thread_id = parse_thread_id(WELCOME_THREAD_ID_RAW)
 
-    print("🚀 Bot en vivo y escuchando en tiempo real...")
+    print("🚀 Bot en vivo escuchando en tiempo real...")
 
     last_yt_check = 0
 
     while True:
         try:
-            # 1. Telegram Moderación (Revisa cada 2 segundos)
             if target_ch1_vids:
                 process_moderation(bot, target_ch1_vids, state, welcome_thread_id=welcome_thread_id)
 
-            # 2. YouTube (Revisa cada 45 segundos)
             now = time.time()
             if now - last_yt_check >= 45:
                 if CHANNEL_ID and target_ch1_vids:
@@ -599,4 +634,6 @@ def main_loop():
         time.sleep(2)
 
 if __name__ == "__main__":
+    # Iniciar servidor Flask en hilo secundario para el health-check de Render
+    Thread(target=run_flask, daemon=True).start()
     main_loop()
