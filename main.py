@@ -178,20 +178,7 @@ async def send_warning_message(bot, group_target, user, reasons, thread_id=None)
         "3️⃣ Pon un <b>nombre de perfil con al menos 3 letras reales</b>.\n\n"
         "⏳ <b>Tienes 1 HORA para cambiarlo.</b> Si en 60 minutos no está corregido, el sistema te expulsará automáticamente (podrás volver a entrar en cuanto lo arregles)."
     )
-    return await send_warning_msg_to_chat(bot, group_target["chat_id"], text, thread_id=thread_id)
-
-async def send_warning_msg_to_chat(bot, chat_id, text, thread_id=None):
-    kwargs = {"parse_mode": "HTML"}
-    if thread_id is not None:
-        try:
-            kwargs["message_thread_id"] = thread_id
-            msg = await bot.send_message(chat_id=chat_id, text=text, **kwargs)
-            return msg.message_id
-        except Exception:
-            pass
-    kwargs.pop("message_thread_id", None)
-    msg = await bot.send_message(chat_id=chat_id, text=text, **kwargs)
-    return msg.message_id
+    return await send_telegram_msg(bot, group_target["chat_id"], text, thread_id=thread_id)
 
 async def process_moderation(bot, group_target, state, welcome_thread_id=None):
     if not group_target:
@@ -207,7 +194,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
 
     pending = state.get("pending_users", {})
 
-    # 1. ACTUALIZACIONES DE TELEGRAM Y LECTURA DE MENSAJES EN TIEMPO REAL
+    # 1. ACTUALIZACIONES DE TELEGRAM Y ESCÁNER DE MENSAJES EN TIEMPO REAL
     last_update_id = state.get("last_update_id", 0)
     try:
         updates = await bot.get_updates(
@@ -221,7 +208,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
             for u in updates:
                 state["last_update_id"] = max(state.get("last_update_id", 0), u.update_id)
 
-                # Si un usuario en lista de aviso escribe un mensaje, evaluamos su perfil inmediatamente
+                # Detección inmediata si un usuario con advertencia escribe un mensaje
                 if u.message and u.message.from_user:
                     sender = u.message.from_user
                     s_str = str(sender.id)
@@ -242,7 +229,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
                             print(f"[{datetime.now().strftime('%H:%M:%S')}] 🎉 Usuario {sender.id} corregido tras escribir mensaje.", flush=True)
                             del pending[s_str]
 
-                # Detección de nuevos miembros
+                # Captura de nuevos miembros que entran al chat
                 if u.message and u.message.new_chat_members:
                     for m in u.message.new_chat_members:
                         if not m.is_bot:
@@ -295,7 +282,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
     except Exception as e:
         print(f"Error en actualizaciones de Telegram: {e}", flush=True)
 
-    # 2. TEMPORIZADOR DE EXPULSIÓN Y COMPROBACIÓN AUTOMÁTICA
+    # 2. COMPROBACIÓN AUTOMÁTICA Y EXPULSIÓN A LA HORA (60 MINUTOS)
     to_remove = []
 
     for user_id_str, pdata in list(pending.items()):
@@ -348,7 +335,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
         if uid in state["pending_users"]:
             del state["pending_users"][uid]
 
-    # 3. BORRADO AUTOMÁTICO DE BIENVENIDAS (2 MINUTOS = 120 SEGUNDOS)
+    # 3. BORRADO AUTOMÁTICO DE BIENVENIDAS A LOS 2 MINUTOS (120 SEGUNDOS)
     welcomes = state.get("pending_welcomes", {})
     welcomes_to_remove = []
 
@@ -370,7 +357,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
             del state["pending_welcomes"][wid]
 
 # ==========================================================
-# FUNCIONES YOUTUBE Y ENVÍO DE AVISOS
+# FUNCIONES YOUTUBE ULTRA-OPTIMIZADAS EN CUOTA
 # ==========================================================
 def yt_get(url, params):
     params = dict(params)
@@ -383,22 +370,19 @@ def get_recent_video_ids(channel_id):
     if not channel_id: return []
     vids = []
 
-    if YT_API_KEY:
-        try:
-            data_live = yt_get("https://www.googleapis.com/youtube/v3/search", {
-                "part": "snippet",
-                "channelId": channel_id,
-                "type": "video",
-                "eventType": "live",
-                "maxResults": 3
-            })
-            for item in data_live.get("items", []):
-                vid = item.get("id", {}).get("videoId")
-                if vid and vid not in vids:
-                    vids.append(vid)
-        except Exception:
-            pass
+    # 1. Canal RSS Oficial (Gasto: 0 créditos)
+    try:
+        rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+        r = requests.get(rss_url, timeout=15)
+        if r.status_code == 200:
+            found_vids = re.findall(r'<yt:videoId>(.*?)</yt:videoId>', r.text)
+            for v in found_vids[:5]:
+                if v not in vids:
+                    vids.append(v)
+    except Exception:
+        pass
 
+    # 2. Lista de reproducción de subidas "UU" (Gasto: Solo 1 crédito)
     playlist_id = "UU" + channel_id[2:]
     try:
         data = yt_get("https://www.googleapis.com/youtube/v3/playlistItems", {
@@ -410,17 +394,6 @@ def get_recent_video_ids(channel_id):
             vid = item["snippet"]["resourceId"]["videoId"]
             if vid not in vids:
                 vids.append(vid)
-    except Exception:
-        pass
-
-    try:
-        rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-        r = requests.get(rss_url, timeout=15)
-        if r.status_code == 200:
-            found_vids = re.findall(r'<yt:videoId>(.*?)</yt:videoId>', r.text)
-            for v in found_vids[:5]:
-                if v not in vids:
-                    vids.append(v)
     except Exception:
         pass
 
@@ -492,31 +465,35 @@ def get_recent_community_posts(channel_id):
     except Exception: return []
 
 def yt_video_info(video_id):
-    data = yt_get("https://www.googleapis.com/youtube/v3/videos", {
-        "part": "snippet,statistics,liveStreamingDetails",
-        "id": video_id
-    })
-    items = data.get("items", [])
-    if not items: return None
-    v = items[0]
-    snippet = v.get("snippet", {})
-    live = v.get("liveStreamingDetails", {})
-    stats = v.get("statistics", {})
+    try:
+        data = yt_get("https://www.googleapis.com/youtube/v3/videos", {
+            "part": "snippet,statistics,liveStreamingDetails",
+            "id": video_id
+        })
+        items = data.get("items", [])
+        if not items: return None
+        v = items[0]
+        snippet = v.get("snippet", {})
+        live = v.get("liveStreamingDetails", {})
+        stats = v.get("statistics", {})
 
-    thumbs = snippet.get("thumbnails", {}) or {}
-    thumb_url = (thumbs.get("maxres") or thumbs.get("high") or thumbs.get("default", {})).get("url")
-    if thumb_url: thumb_url += f"?t={int(time.time())}"
+        thumbs = snippet.get("thumbnails", {}) or {}
+        thumb_url = (thumbs.get("maxres") or thumbs.get("high") or thumbs.get("default", {})).get("url")
+        if thumb_url: thumb_url += f"?t={int(time.time())}"
 
-    return {
-        "vid": video_id,
-        "title": snippet.get("title", ""),
-        "thumb": thumb_url,
-        "link": f"https://www.youtube.com/watch?v={video_id}",
-        "is_live": snippet.get("liveBroadcastContent") == "live",
-        "viewers": live.get("concurrentViewers"),
-        "views": stats.get("viewCount"),
-        "start": live.get("actualStartTime") or snippet.get("publishedAt")
-    }
+        return {
+            "vid": video_id,
+            "title": snippet.get("title", ""),
+            "thumb": thumb_url,
+            "link": f"https://www.youtube.com/watch?v={video_id}",
+            "is_live": snippet.get("liveBroadcastContent") == "live",
+            "viewers": live.get("concurrentViewers"),
+            "views": stats.get("viewCount"),
+            "start": live.get("actualStartTime") or snippet.get("publishedAt")
+        }
+    except Exception as e:
+        print(f"Aviso al consultar info de vídeo {video_id}: {e}", flush=True)
+        return None
 
 def iso_to_local(iso_str):
     if not iso_str: return ""
@@ -660,7 +637,8 @@ async def main_loop():
                     await process_moderation(bot, target_ch1_vids, state, welcome_thread_id=welcome_thread_id)
 
                 now = time.time()
-                if now - last_yt_check >= 45:
+                # Se comprueba YouTube exactamente cada 120 segundos (2 minutos)
+                if now - last_yt_check >= 120:
                     if CHANNEL_ID and target_ch1_vids:
                         await process_channel_videos(bot, target_ch1_vids, CHANNEL_ID, state)
                     if CHANNEL_ID and target_ch1_posts:
