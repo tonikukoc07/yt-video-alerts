@@ -36,7 +36,13 @@
     "xO3OImidZCg": "video",
     "2TqXZv0jc8A": "video"
   },
-  "pending_users": {},
+  "pending_users": {
+    "8134136028": {
+      "user_id": 8134136028,
+      "joined_at": 1786581648,
+      "warning_msg_id": 6052
+    }
+  },
   "pending_welcomes": {},
-  "last_update_id": 808919242
+  "last_update_id": 808919244
 }
