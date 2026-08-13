@@ -465,35 +465,31 @@ def get_recent_community_posts(channel_id):
     except Exception: return []
 
 def yt_video_info(video_id):
-    try:
-        data = yt_get("https://www.googleapis.com/youtube/v3/videos", {
-            "part": "snippet,statistics,liveStreamingDetails",
-            "id": video_id
-        })
-        items = data.get("items", [])
-        if not items: return None
-        v = items[0]
-        snippet = v.get("snippet", {})
-        live = v.get("liveStreamingDetails", {})
-        stats = v.get("statistics", {})
+    data = yt_get("https://www.googleapis.com/youtube/v3/videos", {
+        "part": "snippet,statistics,liveStreamingDetails",
+        "id": video_id
+    })
+    items = data.get("items", [])
+    if not items: return None
+    v = items[0]
+    snippet = v.get("snippet", {})
+    live = v.get("liveStreamingDetails", {})
+    stats = v.get("statistics", {})
 
-        thumbs = snippet.get("thumbnails", {}) or {}
-        thumb_url = (thumbs.get("maxres") or thumbs.get("high") or thumbs.get("default", {})).get("url")
-        if thumb_url: thumb_url += f"?t={int(time.time())}"
+    thumbs = snippet.get("thumbnails", {}) or {}
+    thumb_url = (thumbs.get("maxres") or thumbs.get("high") or thumbs.get("default", {})).get("url")
+    if thumb_url: thumb_url += f"?t={int(time.time())}"
 
-        return {
-            "vid": video_id,
-            "title": snippet.get("title", ""),
-            "thumb": thumb_url,
-            "link": f"https://www.youtube.com/watch?v={video_id}",
-            "is_live": snippet.get("liveBroadcastContent") == "live",
-            "viewers": live.get("concurrentViewers"),
-            "views": stats.get("viewCount"),
-            "start": live.get("actualStartTime") or snippet.get("publishedAt")
-        }
-    except Exception as e:
-        print(f"Aviso al consultar info de vídeo {video_id}: {e}", flush=True)
-        return None
+    return {
+        "vid": video_id,
+        "title": snippet.get("title", ""),
+        "thumb": thumb_url,
+        "link": f"https://www.youtube.com/watch?v={video_id}",
+        "is_live": snippet.get("liveBroadcastContent") == "live",
+        "viewers": live.get("concurrentViewers"),
+        "views": stats.get("viewCount"),
+        "start": live.get("actualStartTime") or snippet.get("publishedAt")
+    }
 
 def iso_to_local(iso_str):
     if not iso_str: return ""
@@ -633,19 +629,25 @@ async def main_loop():
 
         while True:
             try:
+                # 1. Moderación en vivo de Telegram (Siempre activa)
                 if target_ch1_vids:
                     await process_moderation(bot, target_ch1_vids, state, welcome_thread_id=welcome_thread_id)
 
                 now = time.time()
-                # Se comprueba YouTube exactamente cada 120 segundos (2 minutos)
+
+                # 2. Comprobación de YouTube exactamente cada 120 segundos
                 if now - last_yt_check >= 120:
-                    if CHANNEL_ID and target_ch1_vids:
-                        await process_channel_videos(bot, target_ch1_vids, CHANNEL_ID, state)
-                    if CHANNEL_ID and target_ch1_posts:
-                        await process_channel_posts(bot, target_ch1_posts, CHANNEL_ID, state)
-                    if CHANNEL_ID_DIRECTO and target_ch2_vids:
-                        await process_channel_videos(bot, target_ch2_vids, CHANNEL_ID_DIRECTO, state)
-                    last_yt_check = now
+                    last_yt_check = now  # Se fija la hora ANTES para obligar a esperar 2 min en el siguiente intento
+
+                    try:
+                        if CHANNEL_ID and target_ch1_vids:
+                            await process_channel_videos(bot, target_ch1_vids, CHANNEL_ID, state)
+                        if CHANNEL_ID and target_ch1_posts:
+                            await process_channel_posts(bot, target_ch1_posts, CHANNEL_ID, state)
+                        if CHANNEL_ID_DIRECTO and target_ch2_vids:
+                            await process_channel_videos(bot, target_ch2_vids, CHANNEL_ID_DIRECTO, state)
+                    except Exception as yt_err:
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ API de YouTube agotada (Error 403). Esperando 2 min...", flush=True)
 
                 save_state(state)
 
