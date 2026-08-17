@@ -36,11 +36,11 @@ BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
 PROCESSED_USERS_CACHE = {}
 
 # ==========================================================
-# SERVIDOR WEB DUMMY PARA RENDER FREE
+# SERVIDOR WEB DUMMY PARA RENDER FREE (Soporta GET, POST, HEAD)
 # ==========================================================
 app = Flask(__name__)
 
-@app.route('/')
+@app.route('/', methods=['GET', 'POST', 'HEAD'])
 def health_check():
     return "Bot en vivo 24/7", 200
 
@@ -187,14 +187,19 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
     now = int(time.time())
     actual_thread_id = welcome_thread_id
 
-    # Limpieza de memoria
+    # 1. Limpieza de cachés temporales en memoria y estado
     for uid, ts in list(PROCESSED_USERS_CACHE.items()):
         if now - ts > 600:
             del PROCESSED_USERS_CACHE[uid]
 
+    processed_users = state.setdefault("processed_welcome_users", {})
+    for uid_str, ts in list(processed_users.items()):
+        if now - ts > 3600:
+            del processed_users[uid_str]
+
     pending = state.get("pending_users", {})
 
-    # 1. ACTUALIZACIONES DE TELEGRAM Y ESCÁNER DE MENSAJES EN TIEMPO REAL
+    # 2. ACTUALIZACIONES DE TELEGRAM Y ESCÁNER DE MENSAJES EN TIEMPO REAL
     last_update_id = state.get("last_update_id", 0)
     try:
         updates = await bot.get_updates(
@@ -244,7 +249,6 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
                             candidates.append(user)
 
             unique_members = {m.id: m for m in candidates}
-            processed_users = state.setdefault("processed_welcome_users", {})
 
             for member_id, member in unique_members.items():
                 m_str = str(member_id)
@@ -282,7 +286,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
     except Exception as e:
         print(f"Error en actualizaciones de Telegram: {e}", flush=True)
 
-    # 2. COMPROBACIÓN AUTOMÁTICA Y EXPULSIÓN A LA HORA (60 MINUTOS)
+    # 3. COMPROBACIÓN AUTOMÁTICA Y EXPULSIÓN A LA HORA (60 MINUTOS)
     to_remove = []
 
     for user_id_str, pdata in list(pending.items()):
@@ -334,8 +338,16 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
     for uid in to_remove:
         if uid in state["pending_users"]:
             del state["pending_users"][uid]
+        if uid in state.get("processed_welcome_users", {}):
+            del state["processed_welcome_users"][uid]
+        try:
+            uid_int = int(uid)
+            if uid_int in PROCESSED_USERS_CACHE:
+                del PROCESSED_USERS_CACHE[uid_int]
+        except ValueError:
+            pass
 
-    # 3. BORRADO AUTOMÁTICO DE BIENVENIDAS A LOS 2 MINUTOS (120 SEGUNDOS)
+    # 4. BORRADO AUTOMÁTICO DE BIENVENIDAS A LOS 2 MINUTOS (120 SEGUNDOS)
     welcomes = state.get("pending_welcomes", {})
     welcomes_to_remove = []
 
@@ -637,7 +649,7 @@ async def main_loop():
 
                 # 2. Comprobación de YouTube exactamente cada 120 segundos
                 if now - last_yt_check >= 120:
-                    last_yt_check = now  # Se fija la hora ANTES para obligar a esperar 2 min en el siguiente intento
+                    last_yt_check = now
 
                     try:
                         if CHANNEL_ID and target_ch1_vids:
