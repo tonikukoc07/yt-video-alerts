@@ -11,18 +11,17 @@ from flask import Flask
 from telegram import Bot, InputMediaPhoto
 
 STATE_MARKER = "🤖 <b>ESTADO DEL BOT (NO BORRAR)</b>"
+LAST_SAVED_JSON = ""  # Control para evitar saturar la API de Telegram
 
 # ==========================================================
 # CONFIGURACIÓN Y VARIABLES DE ENTORNO
 # ==========================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 
-# Canal 1: Cacharrear con Juan
 CHANNEL_ID = os.environ.get("CHANNEL_ID") or "UC6efY3r4Oiy0ns4ZEAVw4_A"
 CHAT_ID_GROUP_RAW = os.environ.get("CHAT_ID_GROUP") or "-1003839040942_5621"
 CHAT_ID_POSTS_RAW = os.environ.get("CHAT_ID_POSTS") or "-1003839040942_5801"
 
-# Canal 2: Canal de Directos / Secundario
 CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO") or "UCK4h49E7Bol5DD-szyOgFgQ"
 CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO") or "-1003839040942_5622"
 
@@ -82,7 +81,6 @@ def parse_thread_id(raw_val):
         return None
 
 def prune_state(st):
-    """Mantiene el objeto de estado ligero para no exceder el límite de Telegram"""
     for key in ["msg_ids", "msg_ids_posts", "vid_status"]:
         if isinstance(st.get(key), dict) and len(st[key]) > 25:
             keys = list(st[key].keys())
@@ -90,6 +88,7 @@ def prune_state(st):
                 del st[key][k]
 
 async def load_state_from_telegram(bot, log_target):
+    global LAST_SAVED_JSON
     st = {
         "msg_ids": {}, "msg_ids_posts": {}, "vid_status": {},
         "pending_users": {}, "pending_welcomes": {},
@@ -111,8 +110,11 @@ async def load_state_from_telegram(bot, log_target):
     except Exception as e:
         print(f"Buscando mensaje de estado anterior: {e}", flush=True)
 
+    prune_state(st)
+    LAST_SAVED_JSON = json.dumps(st, ensure_ascii=False)
+
     if not state_msg_id:
-        initial_text = f"{STATE_MARKER}\n<pre>{json.dumps(st)}</pre>"
+        initial_text = f"{STATE_MARKER}\n<pre>{LAST_SAVED_JSON}</pre>"
         kwargs = {"parse_mode": "HTML"}
         if log_target.get("thread_id"):
             kwargs["message_thread_id"] = log_target["thread_id"]
@@ -130,11 +132,17 @@ async def load_state_from_telegram(bot, log_target):
     return st, state_msg_id
 
 async def save_state_to_telegram(bot, log_target, state, state_msg_id):
+    global LAST_SAVED_JSON
     if not log_target or not state_msg_id:
         return state_msg_id
 
     prune_state(state)
     json_str = json.dumps(state, ensure_ascii=False)
+
+    # Solo enviamos peticiones de edicion si los datos han cambiado
+    if json_str == LAST_SAVED_JSON:
+        return state_msg_id
+
     text = f"{STATE_MARKER}\n<pre>{json_str}</pre>"
 
     try:
@@ -144,8 +152,11 @@ async def save_state_to_telegram(bot, log_target, state, state_msg_id):
             text=text,
             parse_mode="HTML"
         )
+        LAST_SAVED_JSON = json_str
     except Exception as e:
-        if "message is not modified" not in str(e).lower():
+        if "message is not modified" in str(e).lower():
+            LAST_SAVED_JSON = json_str
+        else:
             print(f"Error guardando estado en Telegram: {e}", flush=True)
     
     return state_msg_id
@@ -606,7 +617,6 @@ async def process_channel_videos(bot, target, channel_id, state, log_target, sta
     target_key_label = target.get('key', 'general')
     target_prefix = f"{target['chat_id']}_{target.get('thread_id')}_"
 
-    # SOLO incluir directos anteriores QUE PERTENEZCAN A ESTE DESTINO ESPECÍFICO
     for key, status in list(state.get("vid_status", {}).items()):
         if status == "live" and key.startswith(target_prefix):
             vid_from_key = key[len(target_prefix):]
@@ -717,15 +727,12 @@ async def main_loop():
                     last_yt_check = now
 
                     try:
-                        # Canal 1 (CacharrearconJuan) -> Vídeos a 5621
                         if CHANNEL_ID and target_ch1_vids:
                             state_msg_id = await process_channel_videos(bot, target_ch1_vids, CHANNEL_ID, state, log_target, state_msg_id)
                         
-                        # Canal 1 (CacharrearconJuan) -> Comunidad a 5801
                         if CHANNEL_ID and target_ch1_posts:
                             state_msg_id = await process_channel_posts(bot, target_ch1_posts, CHANNEL_ID, state, log_target, state_msg_id)
                         
-                        # Canal 2 (Directos / Secundario) -> Vídeos a 5622
                         if CHANNEL_ID_DIRECTO and target_ch2_vids:
                             state_msg_id = await process_channel_videos(bot, target_ch2_vids, CHANNEL_ID_DIRECTO, state, log_target, state_msg_id)
 
