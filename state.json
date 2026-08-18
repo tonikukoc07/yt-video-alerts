@@ -1,5 +1,6 @@
 {
   "msg_ids": {
+    "FmptbQEa9Fo": -1,
     "JmN2TupXad4": 5809,
     "rH6ItLfAYKg": 5810,
     "MrWQpsdDx8I": 5811,
@@ -22,6 +23,7 @@
     "UgkxkPn41bW-wD44jLAfWlrjyqNLozvWVe6a": 6048
   },
   "vid_status": {
+    "FmptbQEa9Fo": "live",
     "JmN2TupXad4": "video",
     "rH6ItLfAYKg": "video",
     "MrWQpsdDx8I": "video",
@@ -36,6 +38,7 @@
     "xO3OImidZCg": "video",
     "2TqXZv0jc8A": "video"
   },
+  "posts_initialized": true,
   "pending_users": {},
   "pending_welcomes": {},
   "last_update_id": 808919263
