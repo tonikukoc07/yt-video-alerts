@@ -306,7 +306,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
                     "msg_id": msg_id,
                     "sent_at": int(time.time())
                 }
-                await send_log(bot, f"🎉 El usuario {format_mention(user)} ha corregido su perfil a tiempo.")
+                await send_log(bot, f"🎉 El usuario {format_mention(user)} ha corregido su perfil a time.")
                 to_remove.append(user_id_str)
             elif now - joined_at >= 3600:
                 try:
@@ -358,7 +358,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
             del state["pending_welcomes"][wid]
 
 # ==========================================================
-# FUNCIONES YOUTUBE ULTRA-OPTIMIZADAS Y DETECCIÓN DE DIRECTOS
+# FUNCIONES YOUTUBE ULTRA-OPTIMIZADAS Y DETECCIÓN SEGURA DE DIRECTOS
 # ==========================================================
 def yt_get(url, params):
     params = dict(params)
@@ -371,22 +371,22 @@ def get_recent_video_ids(channel_id):
     if not channel_id: return []
     vids = []
 
-    # 0. DETECCIÓN EN TIEMPO REAL DE DIRECTOS ACTIVOS / PROGRAMADOS (Scraping directo)
+    # 0. DETECCIÓN EN TIEMPO REAL DE DIRECTOS ACTIVOS (Segura por redirección estricta de URL)
     try:
         live_url = f"https://www.youtube.com/channel/{channel_id}/live"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         r = requests.get(live_url, headers=headers, timeout=10, allow_redirects=True)
-        if r.status_code == 200:
-            found_vids = re.findall(r'href="https://www\.youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})"', r.text)
-            if not found_vids:
-                found_vids = re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', r.text)
-            for v in found_vids:
-                if v not in vids:
-                    vids.append(v)
+        # Solo si YouTube redirige explícitamente a un vídeo en directo (watch?v=)
+        if "watch?v=" in r.url:
+            match = re.search(r'watch\?v=([a-zA-Z0-9_-]{11})', r.url)
+            if match:
+                live_vid = match.group(1)
+                if live_vid not in vids:
+                    vids.append(live_vid)
     except Exception:
         pass
 
-    # 1. Canal RSS Oficial (Gasto: 0 créditos)
+    # 1. Canal RSS Oficial (Gasto: 0 créditos de API)
     try:
         rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
         r = requests.get(rss_url, timeout=15)
@@ -616,7 +616,6 @@ async def process_channel_posts(bot, target, channel_id, state):
     if not posts:
         return
 
-    # Protección contra reenvío de publicaciones antiguas tras reinicio del servidor
     if "posts_initialized" not in state:
         for p in posts:
             state["msg_ids_posts"][p["vid"]] = -1
@@ -653,13 +652,13 @@ async def main_loop():
 
         while True:
             try:
-                # 1. Moderación en vivo de Telegram (Siempre activa)
+                # 1. Moderación en vivo de Telegram
                 if target_ch1_vids:
                     await process_moderation(bot, target_ch1_vids, state, welcome_thread_id=welcome_thread_id)
 
                 now = time.time()
 
-                # 2. Comprobación de YouTube exactamente cada 120 segundos
+                # 2. Comprobación de YouTube cada 120 segundos
                 if now - last_yt_check >= 120:
                     last_yt_check = now
 
