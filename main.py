@@ -10,7 +10,7 @@ from threading import Thread
 from flask import Flask
 from telegram import Bot, InputMediaPhoto
 
-STATE_FILE = "state.json"
+STATE_MARKER = "🤖 <b>ESTADO DEL BOT (NO BORRAR)</b>"
 
 # ==========================================================
 # CONFIGURACIÓN Y VARIABLES DE ENTORNO
@@ -32,11 +32,10 @@ TZ = os.environ.get("TZ", "Europe/Madrid")
 PIN_LATEST = os.environ.get("PIN_LATEST", "1") == "1"
 BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
 
-# Caché temporal en memoria
 PROCESSED_USERS_CACHE = {}
 
 # ==========================================================
-# SERVIDOR WEB DUMMY PARA RENDER FREE (Soporta GET, POST, HEAD)
+# SERVIDOR WEB DUMMY PARA RENDER
 # ==========================================================
 app = Flask(__name__)
 
@@ -49,12 +48,8 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 # ==========================================================
-# FUNCIONES AUXILIARES Y ESTADO
+# FUNCIONES AUXILIARES Y ESTADO EN TELEGRAM
 # ==========================================================
-def must_env(name, value):
-    if not value:
-        raise RuntimeError(f"Missing env var: {name}")
-
 def parse_target(raw_str, key_name="default"):
     if not raw_str:
         return None
@@ -84,25 +79,74 @@ def parse_thread_id(raw_val):
     except ValueError:
         return None
 
-def load_state():
-    st = {}
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                st = json.load(f)
-        except Exception:
-            st = {}
-    if not isinstance(st, dict):
-        st = {}
-    for key in ["msg_ids", "msg_ids_posts", "vid_status", "pending_users", "pending_welcomes", "processed_welcome_users"]:
-        if not isinstance(st.get(key), dict): st[key] = {}
-    if "last_update_id" not in st or not isinstance(st["last_update_id"], int):
-        st["last_update_id"] = 0
-    return st
+def prune_state(st):
+    """Mantiene el objeto de estado ligero para no exceder el límite de Telegram"""
+    for key in ["msg_ids", "msg_ids_posts", "vid_status"]:
+        if isinstance(st.get(key), dict) and len(st[key]) > 25:
+            keys = list(st[key].keys())
+            for k in keys[:-20]:
+                del st[key][k]
 
-def save_state(st):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(st, f, ensure_ascii=False, indent=2)
+async def load_state_from_telegram(bot, log_target):
+    st = {
+        "msg_ids": {}, "msg_ids_posts": {}, "vid_status": {},
+        "pending_users": {}, "pending_welcomes": {}, "processed_welcome_users": {},
+        "last_update_id": 0
+    }
+    state_msg_id = None
+    if not log_target:
+        return st, None
+
+    chat_id = log_target["chat_id"]
+    try:
+        chat = await bot.get_chat(chat_id)
+        if chat.pinned_message and STATE_MARKER in (chat.pinned_message.text or chat.pinned_message.caption or ""):
+            msg_text = chat.pinned_message.text or chat.pinned_message.caption or ""
+            state_msg_id = chat.pinned_message.message_id
+            match = re.search(r"<pre>(.*?)</pre>", msg_text, re.DOTALL)
+            if match:
+                st = json.loads(match.group(1))
+    except Exception as e:
+        print(f"Buscando mensaje de estado anterior: {e}", flush=True)
+
+    if not state_msg_id:
+        initial_text = f"{STATE_MARKER}\n<pre>{json.dumps(st)}</pre>"
+        kwargs = {"parse_mode": "HTML"}
+        if log_target.get("thread_id"):
+            kwargs["message_thread_id"] = log_target["thread_id"]
+        
+        try:
+            msg = await bot.send_message(chat_id=chat_id, text=initial_text, **kwargs)
+            state_msg_id = msg.message_id
+            try:
+                await bot.pin_chat_message(chat_id=chat_id, message_id=state_msg_id, disable_notification=True)
+            except Exception as pin_err:
+                print(f"Aviso al fijar estado: {pin_err}", flush=True)
+        except Exception as e:
+            print(f"Error creando base de datos en Telegram: {e}", flush=True)
+
+    return st, state_msg_id
+
+async def save_state_to_telegram(bot, log_target, state, state_msg_id):
+    if not log_target or not state_msg_id:
+        return state_msg_id
+
+    prune_state(state)
+    json_str = json.dumps(state, ensure_ascii=False)
+    text = f"{STATE_MARKER}\n<pre>{json_str}</pre>"
+
+    try:
+        await bot.edit_message_text(
+            chat_id=log_target["chat_id"],
+            message_id=state_msg_id,
+            text=text,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        if "message is not modified" not in str(e).lower():
+            print(f"Error guardando estado en Telegram: {e}", flush=True)
+    
+    return state_msg_id
 
 async def send_telegram_msg(bot, chat_id, text, thread_id=None, parse_mode="HTML"):
     kwargs = {"parse_mode": parse_mode}
@@ -112,7 +156,7 @@ async def send_telegram_msg(bot, chat_id, text, thread_id=None, parse_mode="HTML
             msg = await bot.send_message(chat_id=chat_id, text=text, **kwargs)
             return msg.message_id
         except Exception as e:
-            print(f"Aviso: No se pudo enviar con thread_id={thread_id} ({e}). Enviando al canal principal.", flush=True)
+            print(f"Aviso: No se pudo enviar con thread_id={thread_id} ({e}). Enviando al principal.", flush=True)
 
     kwargs.pop("message_thread_id", None)
     msg = await bot.send_message(chat_id=chat_id, text=text, **kwargs)
@@ -180,14 +224,13 @@ async def send_warning_message(bot, group_target, user, reasons, thread_id=None)
     )
     return await send_telegram_msg(bot, group_target["chat_id"], text, thread_id=thread_id)
 
-async def process_moderation(bot, group_target, state, welcome_thread_id=None):
+async def process_moderation(bot, group_target, state, log_target, state_msg_id, welcome_thread_id=None):
     if not group_target:
-        return
+        return state_msg_id
 
     now = int(time.time())
     actual_thread_id = welcome_thread_id
 
-    # 1. Limpieza de cachés temporales en memoria y estado
     for uid, ts in list(PROCESSED_USERS_CACHE.items()):
         if now - ts > 600:
             del PROCESSED_USERS_CACHE[uid]
@@ -198,9 +241,8 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
             del processed_users[uid_str]
 
     pending = state.get("pending_users", {})
-
-    # 2. ACTUALIZACIONES DE TELEGRAM Y ESCÁNER DE MENSAJES EN TIEMPO REAL
     last_update_id = state.get("last_update_id", 0)
+
     try:
         updates = await bot.get_updates(
             offset=last_update_id + 1 if last_update_id > 0 else None,
@@ -213,7 +255,6 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
             for u in updates:
                 state["last_update_id"] = max(state.get("last_update_id", 0), u.update_id)
 
-                # Detección inmediata si un usuario con advertencia escribe un mensaje
                 if u.message and u.message.from_user:
                     sender = u.message.from_user
                     s_str = str(sender.id)
@@ -231,10 +272,8 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
                                 "sent_at": int(time.time())
                             }
                             await send_log(bot, f"🎉 El usuario {format_mention(sender)} ha corregido su perfil a tiempo.")
-                            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🎉 Usuario {sender.id} corregido tras escribir mensaje.", flush=True)
                             del pending[s_str]
 
-                # Captura de nuevos miembros que entran al chat
                 if u.message and u.message.new_chat_members:
                     for m in u.message.new_chat_members:
                         if not m.is_bot:
@@ -267,8 +306,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
                             "msg_id": msg_id,
                             "sent_at": int(time.time())
                         }
-                        await send_log(bot, f"✅ Bienvenida enviada a {format_mention(member)} (Perfil correcto).")
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Bienvenida enviada a {member.id}", flush=True)
+                        await send_log(bot, f"✅ Bienvenida enviada a {format_mention(member)}.")
                     else:
                         msg_id = await send_warning_message(bot, group_target, member, reasons, thread_id=actual_thread_id)
                         pending[m_str] = {
@@ -276,19 +314,16 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
                             "joined_at": int(time.time()),
                             "warning_msg_id": msg_id
                         }
-                        await send_log(bot, f"⚠️ Aviso enviado a {format_mention(member)} por incumplir normas (60 min restantes).")
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Aviso enviado a {member.id}", flush=True)
+                        await send_log(bot, f"⚠️ Aviso enviado a {format_mention(member)}.")
                 except Exception as ex_m:
                     print(f"Error procesando bienvenida: {ex_m}", flush=True)
 
-            save_state(state)
+            await save_state_to_telegram(bot, log_target, state, state_msg_id)
 
     except Exception as e:
         print(f"Error en actualizaciones de Telegram: {e}", flush=True)
 
-    # 3. COMPROBACIÓN AUTOMÁTICA Y EXPULSIÓN A LA HORA (60 MINUTOS)
     to_remove = []
-
     for user_id_str, pdata in list(pending.items()):
         user_id = pdata["user_id"]
         joined_at = pdata["joined_at"]
@@ -314,8 +349,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
                     "msg_id": msg_id,
                     "sent_at": int(time.time())
                 }
-                await send_log(bot, f"🎉 El usuario {format_mention(user)} ha corregido su perfil a tiempo.")
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] 🎉 Usuario {user_id} corregido automáticamente.", flush=True)
+                await send_log(bot, f"🎉 El usuario {format_mention(user)} ha corregido su perfil.")
                 to_remove.append(user_id_str)
             elif now - joined_at >= 3600:
                 try:
@@ -326,7 +360,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
                 try:
                     await bot.ban_chat_member(chat_id=group_target["chat_id"], user_id=user_id)
                     await bot.unban_chat_member(chat_id=group_target["chat_id"], user_id=user_id)
-                    await send_log(bot, f"🚫 Usuario <code>{user_id}</code> expulsado tras 60 min sin corregir su perfil.")
+                    await send_log(bot, f"🚫 Usuario <code>{user_id}</code> expulsado tras 60 min.")
                 except Exception as e:
                     print(f"Error al expulsar usuario: {e}", flush=True)
 
@@ -340,36 +374,28 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
             del state["pending_users"][uid]
         if uid in state.get("processed_welcome_users", {}):
             del state["processed_welcome_users"][uid]
-        try:
-            uid_int = int(uid)
-            if uid_int in PROCESSED_USERS_CACHE:
-                del PROCESSED_USERS_CACHE[uid_int]
-        except ValueError:
-            pass
 
-    # 4. BORRADO AUTOMÁTICO DE BIENVENIDAS A LOS 2 MINUTOS (120 SEGUNDOS)
     welcomes = state.get("pending_welcomes", {})
     welcomes_to_remove = []
 
     for msg_id_str, wdata in list(welcomes.items()):
         msg_id = wdata["msg_id"]
         sent_at = wdata["sent_at"]
-        elapsed = now - sent_at
-
-        if elapsed >= 120:
+        if now - sent_at >= 120:
             try:
                 await bot.delete_message(chat_id=group_target["chat_id"], message_id=msg_id)
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] 🗑️ Mensaje de bienvenida {msg_id} eliminado tras {elapsed}s", flush=True)
             except Exception as e:
-                print(f"Error borrando mensaje de bienvenida {msg_id}: {e}", flush=True)
+                print(f"Error borrando bienvenida {msg_id}: {e}", flush=True)
             welcomes_to_remove.append(msg_id_str)
 
     for wid in welcomes_to_remove:
         if wid in state["pending_welcomes"]:
             del state["pending_welcomes"][wid]
 
+    return state_msg_id
+
 # ==========================================================
-# FUNCIONES YOUTUBE ULTRA-OPTIMIZADAS EN CUOTA
+# FUNCIONES YOUTUBE
 # ==========================================================
 def yt_get(url, params):
     params = dict(params)
@@ -382,7 +408,6 @@ def get_recent_video_ids(channel_id):
     if not channel_id: return []
     vids = []
 
-    # 1. Canal RSS Oficial (Gasto: 0 créditos)
     try:
         rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
         r = requests.get(rss_url, timeout=15)
@@ -394,7 +419,6 @@ def get_recent_video_ids(channel_id):
     except Exception:
         pass
 
-    # 2. Lista de reproducción de subidas "UU" (Gasto: Solo 1 crédito)
     playlist_id = "UU" + channel_id[2:]
     try:
         data = yt_get("https://www.googleapis.com/youtube/v3/playlistItems", {
@@ -492,7 +516,6 @@ def yt_video_info(video_id):
     thumb_url = (thumbs.get("maxres") or thumbs.get("high") or thumbs.get("default", {})).get("url")
     if thumb_url: thumb_url += f"?t={int(time.time())}"
 
-    # Detección ultra-precisa de directo activo
     broadcast_content = snippet.get("liveBroadcastContent", "")
     has_ended = "actualEndTime" in live
     is_live = (broadcast_content == "live") and not has_ended
@@ -526,7 +549,7 @@ def format_caption(info, kind):
 
     if kind == "live":
         v_line = f"👀 {info['viewers']} viewers\n" if info['viewers'] else ""
-        return f"🔴 <b>DIRECTO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n👉 {info['link']}"
+        return f"🔴 <b>DIRECTO EN VIVO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n👉 {info['link']}"
     
     v_line = f"👀 {info['views']} views\n" if info['views'] else ""
     return f"🎥 <b>NUEVO VÍDEO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n👉 {info['link']}"
@@ -559,7 +582,10 @@ async def update_msg(bot, target, mid, info, kind):
         else:
             await bot.edit_message_text(chat_id=target["chat_id"], message_id=mid, text=cap, parse_mode="HTML")
             return True
-    except Exception:
+    except Exception as e:
+        err_str = str(e).lower()
+        if "message is not modified" in err_str:
+            return True
         try: 
             await bot.edit_message_caption(chat_id=target["chat_id"], message_id=mid, caption=cap, parse_mode="HTML")
             return True
@@ -570,19 +596,17 @@ async def update_msg(bot, target, mid, info, kind):
             except Exception:
                 return False
 
-async def process_channel_videos(bot, target, channel_id, state):
+async def process_channel_videos(bot, target, channel_id, state, log_target, state_msg_id):
     if not target or not channel_id:
-        return
+        return state_msg_id
 
     vids = get_recent_video_ids(channel_id)
 
-    # 💡 MEJORA CLAVE:
-    # Añadimos a la lista de revisión todos los vídeos que figuren con estado "live"
-    # en state["vid_status"]. Así, aunque finalice el directo y desaparezca temporalmente del feed RSS/Playlist,
-    # el bot seguirá consultando la API de YouTube hasta detectar que pasó a "video" y actualizar el mensaje.
-    for vid, status in list(state.get("vid_status", {}).items()):
-        if status == "live" and vid not in vids:
-            vids.append(vid)
+    for key, status in list(state.get("vid_status", {}).items()):
+        if status == "live":
+            vid_from_key = key.split("_")[-1]
+            if vid_from_key not in vids:
+                vids.append(vid_from_key)
 
     newest_vid = vids[0] if vids else None
 
@@ -592,97 +616,110 @@ async def process_channel_videos(bot, target, channel_id, state):
             if not info: continue
 
             kind = "live" if info["is_live"] else "video"
-            mid = state["msg_ids"].get(vid)
+            key = f"{target['chat_id']}_{target.get('thread_id')}_{vid}"
+            mid = state["msg_ids"].get(key) or state["msg_ids"].get(vid)
 
             if BASELINE_ONLY:
                 if not mid:
-                    state["msg_ids"][vid] = -1
-                    state["vid_status"][vid] = kind
+                    state["msg_ids"][key] = -1
+                    state["vid_status"][key] = kind
+                    state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
                 continue
 
             if not mid:
                 mid = await send_post(bot, target, info, kind)
-                state["msg_ids"][vid] = mid
-                state["vid_status"][vid] = kind
-                await send_log(bot, f"📢 Alerta de contenido publicada: <b>{info['title']}</b> ({kind.upper()}).")
+                if mid:
+                    state["msg_ids"][key] = mid
+                    state["vid_status"][key] = kind
+                    state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
+                    await send_log(bot, f"📢 Alerta publicada: <b>{info['title']}</b> ({kind.upper()}).")
 
-                if PIN_LATEST and vid == newest_vid:
-                    try:
-                        if target.get("thread_id"):
-                            await bot.unpin_all_chat_messages(chat_id=target["chat_id"], message_thread_id=target["thread_id"])
-                        else:
-                            await bot.unpin_all_chat_messages(chat_id=target["chat_id"])
-                        await bot.pin_chat_message(chat_id=target["chat_id"], message_id=mid, disable_notification=True)
-                    except Exception as e:
-                        print(f"Error al fijar mensaje: {e}", flush=True)
+                    if PIN_LATEST and vid == newest_vid:
+                        try:
+                            if target.get("thread_id"):
+                                await bot.unpin_all_chat_messages(chat_id=target["chat_id"], message_thread_id=target["thread_id"])
+                            else:
+                                await bot.unpin_all_chat_messages(chat_id=target["chat_id"])
+                            await bot.pin_chat_message(chat_id=target["chat_id"], message_id=mid, disable_notification=True)
+                        except Exception as e:
+                            print(f"Error al fijar mensaje: {e}", flush=True)
 
             elif mid != -1:
-                old_kind = state["vid_status"].get(vid)
+                old_kind = state["vid_status"].get(key) or state["vid_status"].get(vid)
                 if old_kind != kind:
-                    actual_mid = mid if isinstance(mid, int) else mid.get(target["key"])
-                    if actual_mid:
-                        if await update_msg(bot, target, actual_mid, info, kind):
-                            state["vid_status"][vid] = kind
-                            await send_log(bot, f"🔄 Estado de vídeo actualizado: <b>{info['title']}</b> pasó de {old_kind} a {kind}.")
+                    if await update_msg(bot, target, mid, info, kind):
+                        state["msg_ids"][key] = mid
+                        state["vid_status"][key] = kind
+                        state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
+                        await send_log(bot, f"🔄 Estado actualizado: <b>{info['title']}</b> pasó de {old_kind} a {kind}.")
 
-async def process_channel_posts(bot, target, channel_id, state):
+    return state_msg_id
+
+async def process_channel_posts(bot, target, channel_id, state, log_target, state_msg_id):
     if not target or not channel_id:
-        return
+        return state_msg_id
 
     posts = get_recent_community_posts(channel_id)
     if posts:
         latest_post = posts[0]
         post_id = latest_post["vid"]
+        key = f"{target['chat_id']}_{target.get('thread_id')}_{post_id}"
 
         if BASELINE_ONLY:
-            if post_id not in state["msg_ids_posts"]:
-                state["msg_ids_posts"][post_id] = -1
+            if key not in state["msg_ids_posts"]:
+                state["msg_ids_posts"][key] = -1
+                state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
         else:
-            if post_id not in state["msg_ids_posts"]:
+            if key not in state["msg_ids_posts"] and post_id not in state["msg_ids_posts"]:
                 mid = await send_post(bot, target, latest_post, "post")
-                state["msg_ids_posts"][post_id] = mid
-                await send_log(bot, f"💬 Nueva publicación de comunidad enviada.")
+                if mid:
+                    state["msg_ids_posts"][key] = mid
+                    state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
+                    await send_log(bot, f"💬 Nueva publicación de comunidad enviada.")
+
+    return state_msg_id
 
 # ==========================================================
 # BUCLE PRINCIPAL ASÍNCRONO
 # ==========================================================
 async def main_loop():
-    must_env("TELEGRAM_TOKEN", TELEGRAM_TOKEN)
+    if not TELEGRAM_TOKEN:
+        raise RuntimeError("Missing env var: TELEGRAM_TOKEN")
+
     async with Bot(token=TELEGRAM_TOKEN) as bot:
-        state = load_state()
+        log_target = parse_target(LOG_CHAT_ID_RAW, "log_channel")
+        state, state_msg_id = await load_state_from_telegram(bot, log_target)
 
         target_ch1_vids = parse_target(CHAT_ID_GROUP_RAW, "ch1_vids")
         target_ch1_posts = parse_target(CHAT_ID_POSTS_RAW, "ch1_posts")
         target_ch2_vids = parse_target(CHAT_ID_GROUP_DIRECTO_RAW, "ch2_vids")
         welcome_thread_id = parse_thread_id(WELCOME_THREAD_ID_RAW)
 
-        print("🚀 Bot en vivo escuchando en tiempo real...", flush=True)
+        print("🚀 Bot activo y escuchando...", flush=True)
 
         last_yt_check = 0
 
         while True:
             try:
-                # 1. Moderación en vivo de Telegram (Siempre activa)
                 if target_ch1_vids:
-                    await process_moderation(bot, target_ch1_vids, state, welcome_thread_id=welcome_thread_id)
+                    state_msg_id = await process_moderation(bot, target_ch1_vids, state, log_target, state_msg_id, welcome_thread_id=welcome_thread_id)
 
                 now = time.time()
 
-                # 2. Comprobación de YouTube exactamente cada 120 segundos
                 if now - last_yt_check >= 120:
                     last_yt_check = now
 
                     try:
                         if CHANNEL_ID and target_ch1_vids:
-                            await process_channel_videos(bot, target_ch1_vids, CHANNEL_ID, state)
+                            state_msg_id = await process_channel_videos(bot, target_ch1_vids, CHANNEL_ID, state, log_target, state_msg_id)
                         if CHANNEL_ID and target_ch1_posts:
-                            await process_channel_posts(bot, target_ch1_posts, CHANNEL_ID, state)
+                            state_msg_id = await process_channel_posts(bot, target_ch1_posts, CHANNEL_ID, state, log_target, state_msg_id)
                         if CHANNEL_ID_DIRECTO and target_ch2_vids:
-                            await process_channel_videos(bot, target_ch2_vids, CHANNEL_ID_DIRECTO, state)
+                            state_msg_id = await process_channel_videos(bot, target_ch2_vids, CHANNEL_ID_DIRECTO, state, log_target, state_msg_id)
                     except Exception as yt_err:
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Error comprobando API de YouTube: {yt_err}. Esperando 2 min...", flush=True)
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Error API YouTube: {yt_err}", flush=True)
 
-                save_state(state)
+                state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
 
             except Exception as e:
                 print(f"Error en bucle principal: {e}", flush=True)
