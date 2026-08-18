@@ -17,10 +17,12 @@ STATE_MARKER = "🤖 <b>ESTADO DEL BOT (NO BORRAR)</b>"
 # ==========================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 
+# Canal 1: Cacharrear con Juan
 CHANNEL_ID = os.environ.get("CHANNEL_ID") or "UC6efY3r4Oiy0ns4ZEAVw4_A"
 CHAT_ID_GROUP_RAW = os.environ.get("CHAT_ID_GROUP") or "-1003839040942_5621"
 CHAT_ID_POSTS_RAW = os.environ.get("CHAT_ID_POSTS") or "-1003839040942_5801"
 
+# Canal 2: Canal de Directos / Secundario
 CHANNEL_ID_DIRECTO = os.environ.get("CHANNEL_ID_DIRECTO") or "UCK4h49E7Bol5DD-szyOgFgQ"
 CHAT_ID_GROUP_DIRECTO_RAW = os.environ.get("CHAT_ID_GROUP_DIRECTO") or "-1003839040942_5622"
 
@@ -90,8 +92,8 @@ def prune_state(st):
 async def load_state_from_telegram(bot, log_target):
     st = {
         "msg_ids": {}, "msg_ids_posts": {}, "vid_status": {},
-        "pending_users": {}, "pending_welcomes": {}, "processed_welcome_users": {},
-        "last_update_id": 0
+        "pending_users": {}, "pending_welcomes": {},
+        "processed_welcome_users": {}, "last_update_id": 0
     }
     state_msg_id = None
     if not log_target:
@@ -601,10 +603,13 @@ async def process_channel_videos(bot, target, channel_id, state, log_target, sta
         return state_msg_id
 
     vids = get_recent_video_ids(channel_id)
+    target_key_label = target.get('key', 'general')
+    target_prefix = f"{target['chat_id']}_{target.get('thread_id')}_"
 
+    # SOLO incluir directos anteriores QUE PERTENEZCAN A ESTE DESTINO ESPECÍFICO
     for key, status in list(state.get("vid_status", {}).items()):
-        if status == "live":
-            vid_from_key = key.split("_")[-1]
+        if status == "live" and key.startswith(target_prefix):
+            vid_from_key = key[len(target_prefix):]
             if vid_from_key not in vids:
                 vids.append(vid_from_key)
 
@@ -616,8 +621,8 @@ async def process_channel_videos(bot, target, channel_id, state, log_target, sta
             if not info: continue
 
             kind = "live" if info["is_live"] else "video"
-            key = f"{target['chat_id']}_{target.get('thread_id')}_{vid}"
-            mid = state["msg_ids"].get(key) or state["msg_ids"].get(vid)
+            key = f"{target_prefix}{vid}"
+            mid = state["msg_ids"].get(key)
 
             if BASELINE_ONLY:
                 if not mid:
@@ -632,7 +637,7 @@ async def process_channel_videos(bot, target, channel_id, state, log_target, sta
                     state["msg_ids"][key] = mid
                     state["vid_status"][key] = kind
                     state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
-                    await send_log(bot, f"📢 Alerta publicada: <b>{info['title']}</b> ({kind.upper()}).")
+                    await send_log(bot, f"📢 [{target_key_label}] Alerta publicada: <b>{info['title']}</b> ({kind.upper()}).")
 
                     if PIN_LATEST and vid == newest_vid:
                         try:
@@ -645,13 +650,13 @@ async def process_channel_videos(bot, target, channel_id, state, log_target, sta
                             print(f"Error al fijar mensaje: {e}", flush=True)
 
             elif mid != -1:
-                old_kind = state["vid_status"].get(key) or state["vid_status"].get(vid)
+                old_kind = state["vid_status"].get(key)
                 if old_kind != kind:
                     if await update_msg(bot, target, mid, info, kind):
                         state["msg_ids"][key] = mid
                         state["vid_status"][key] = kind
                         state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
-                        await send_log(bot, f"🔄 Estado actualizado: <b>{info['title']}</b> pasó de {old_kind} a {kind}.")
+                        await send_log(bot, f"🔄 [{target_key_label}] Estado actualizado: <b>{info['title']}</b> pasó de {old_kind} a {kind}.")
 
     return state_msg_id
 
@@ -660,6 +665,8 @@ async def process_channel_posts(bot, target, channel_id, state, log_target, stat
         return state_msg_id
 
     posts = get_recent_community_posts(channel_id)
+    target_key_label = target.get('key', 'general')
+
     if posts:
         latest_post = posts[0]
         post_id = latest_post["vid"]
@@ -670,12 +677,12 @@ async def process_channel_posts(bot, target, channel_id, state, log_target, stat
                 state["msg_ids_posts"][key] = -1
                 state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
         else:
-            if key not in state["msg_ids_posts"] and post_id not in state["msg_ids_posts"]:
+            if key not in state["msg_ids_posts"]:
                 mid = await send_post(bot, target, latest_post, "post")
                 if mid:
                     state["msg_ids_posts"][key] = mid
                     state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
-                    await send_log(bot, f"💬 Nueva publicación de comunidad enviada.")
+                    await send_log(bot, f"💬 [{target_key_label}] Nueva publicación de comunidad enviada.")
 
     return state_msg_id
 
@@ -690,9 +697,9 @@ async def main_loop():
         log_target = parse_target(LOG_CHAT_ID_RAW, "log_channel")
         state, state_msg_id = await load_state_from_telegram(bot, log_target)
 
-        target_ch1_vids = parse_target(CHAT_ID_GROUP_RAW, "ch1_vids")
-        target_ch1_posts = parse_target(CHAT_ID_POSTS_RAW, "ch1_posts")
-        target_ch2_vids = parse_target(CHAT_ID_GROUP_DIRECTO_RAW, "ch2_vids")
+        target_ch1_vids = parse_target(CHAT_ID_GROUP_RAW, "ch1_vids")        # Topic 5621
+        target_ch1_posts = parse_target(CHAT_ID_POSTS_RAW, "ch1_posts")      # Topic 5801
+        target_ch2_vids = parse_target(CHAT_ID_GROUP_DIRECTO_RAW, "ch2_vids") # Topic 5622
         welcome_thread_id = parse_thread_id(WELCOME_THREAD_ID_RAW)
 
         print("🚀 Bot activo y escuchando...", flush=True)
@@ -710,12 +717,18 @@ async def main_loop():
                     last_yt_check = now
 
                     try:
+                        # Canal 1 (CacharrearconJuan) -> Vídeos a 5621
                         if CHANNEL_ID and target_ch1_vids:
                             state_msg_id = await process_channel_videos(bot, target_ch1_vids, CHANNEL_ID, state, log_target, state_msg_id)
+                        
+                        # Canal 1 (CacharrearconJuan) -> Comunidad a 5801
                         if CHANNEL_ID and target_ch1_posts:
                             state_msg_id = await process_channel_posts(bot, target_ch1_posts, CHANNEL_ID, state, log_target, state_msg_id)
+                        
+                        # Canal 2 (Directos / Secundario) -> Vídeos a 5622
                         if CHANNEL_ID_DIRECTO and target_ch2_vids:
                             state_msg_id = await process_channel_videos(bot, target_ch2_vids, CHANNEL_ID_DIRECTO, state, log_target, state_msg_id)
+
                     except Exception as yt_err:
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Error API YouTube: {yt_err}", flush=True)
 
