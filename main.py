@@ -187,6 +187,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
     now = int(time.time())
     actual_thread_id = welcome_thread_id
 
+    # 1. Limpieza de cachés temporales en memoria y estado
     for uid, ts in list(PROCESSED_USERS_CACHE.items()):
         if now - ts > 600:
             del PROCESSED_USERS_CACHE[uid]
@@ -198,6 +199,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
 
     pending = state.get("pending_users", {})
 
+    # 2. ACTUALIZACIONES DE TELEGRAM Y ESCÁNER DE MENSAJES EN TIEMPO REAL
     last_update_id = state.get("last_update_id", 0)
     try:
         updates = await bot.get_updates(
@@ -211,6 +213,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
             for u in updates:
                 state["last_update_id"] = max(state.get("last_update_id", 0), u.update_id)
 
+                # Detección inmediata si un usuario con advertencia escribe un mensaje
                 if u.message and u.message.from_user:
                     sender = u.message.from_user
                     s_str = str(sender.id)
@@ -228,8 +231,10 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
                                 "sent_at": int(time.time())
                             }
                             await send_log(bot, f"🎉 El usuario {format_mention(sender)} ha corregido su perfil a tiempo.")
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🎉 Usuario {sender.id} corregido tras escribir mensaje.", flush=True)
                             del pending[s_str]
 
+                # Captura de nuevos miembros que entran al chat
                 if u.message and u.message.new_chat_members:
                     for m in u.message.new_chat_members:
                         if not m.is_bot:
@@ -263,6 +268,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
                             "sent_at": int(time.time())
                         }
                         await send_log(bot, f"✅ Bienvenida enviada a {format_mention(member)} (Perfil correcto).")
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Bienvenida enviada a {member.id}", flush=True)
                     else:
                         msg_id = await send_warning_message(bot, group_target, member, reasons, thread_id=actual_thread_id)
                         pending[m_str] = {
@@ -271,6 +277,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
                             "warning_msg_id": msg_id
                         }
                         await send_log(bot, f"⚠️ Aviso enviado a {format_mention(member)} por incumplir normas (60 min restantes).")
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Aviso enviado a {member.id}", flush=True)
                 except Exception as ex_m:
                     print(f"Error procesando bienvenida: {ex_m}", flush=True)
 
@@ -279,6 +286,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
     except Exception as e:
         print(f"Error en actualizaciones de Telegram: {e}", flush=True)
 
+    # 3. COMPROBACIÓN AUTOMÁTICA Y EXPULSIÓN A LA HORA (60 MINUTOS)
     to_remove = []
 
     for user_id_str, pdata in list(pending.items()):
@@ -306,7 +314,8 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
                     "msg_id": msg_id,
                     "sent_at": int(time.time())
                 }
-                await send_log(bot, f"🎉 El usuario {format_mention(user)} ha corregido su perfil a time.")
+                await send_log(bot, f"🎉 El usuario {format_mention(user)} ha corregido su perfil a tiempo.")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 🎉 Usuario {user_id} corregido automáticamente.", flush=True)
                 to_remove.append(user_id_str)
             elif now - joined_at >= 3600:
                 try:
@@ -338,6 +347,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
         except ValueError:
             pass
 
+    # 4. BORRADO AUTOMÁTICO DE BIENVENIDAS A LOS 2 MINUTOS (120 SEGUNDOS)
     welcomes = state.get("pending_welcomes", {})
     welcomes_to_remove = []
 
@@ -349,6 +359,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
         if elapsed >= 120:
             try:
                 await bot.delete_message(chat_id=group_target["chat_id"], message_id=msg_id)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 🗑️ Mensaje de bienvenida {msg_id} eliminado tras {elapsed}s", flush=True)
             except Exception as e:
                 print(f"Error borrando mensaje de bienvenida {msg_id}: {e}", flush=True)
             welcomes_to_remove.append(msg_id_str)
@@ -358,7 +369,7 @@ async def process_moderation(bot, group_target, state, welcome_thread_id=None):
             del state["pending_welcomes"][wid]
 
 # ==========================================================
-# FUNCIONES YOUTUBE ULTRA-OPTIMIZADAS Y DETECCIÓN SEGURA DE DIRECTOS
+# FUNCIONES YOUTUBE ULTRA-OPTIMIZADAS EN CUOTA
 # ==========================================================
 def yt_get(url, params):
     params = dict(params)
@@ -371,22 +382,7 @@ def get_recent_video_ids(channel_id):
     if not channel_id: return []
     vids = []
 
-    # 0. DETECCIÓN EN TIEMPO REAL DE DIRECTOS ACTIVOS (Segura por redirección estricta de URL)
-    try:
-        live_url = f"https://www.youtube.com/channel/{channel_id}/live"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        r = requests.get(live_url, headers=headers, timeout=10, allow_redirects=True)
-        # Solo si YouTube redirige explícitamente a un vídeo en directo (watch?v=)
-        if "watch?v=" in r.url:
-            match = re.search(r'watch\?v=([a-zA-Z0-9_-]{11})', r.url)
-            if match:
-                live_vid = match.group(1)
-                if live_vid not in vids:
-                    vids.append(live_vid)
-    except Exception:
-        pass
-
-    # 1. Canal RSS Oficial (Gasto: 0 créditos de API)
+    # 1. Canal RSS Oficial (Gasto: 0 créditos)
     try:
         rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
         r = requests.get(rss_url, timeout=15)
@@ -496,12 +492,17 @@ def yt_video_info(video_id):
     thumb_url = (thumbs.get("maxres") or thumbs.get("high") or thumbs.get("default", {})).get("url")
     if thumb_url: thumb_url += f"?t={int(time.time())}"
 
+    # Detección ultra-precisa de directo activo
+    broadcast_content = snippet.get("liveBroadcastContent", "")
+    has_ended = "actualEndTime" in live
+    is_live = (broadcast_content == "live") and not has_ended
+
     return {
         "vid": video_id,
         "title": snippet.get("title", ""),
         "thumb": thumb_url,
         "link": f"https://www.youtube.com/watch?v={video_id}",
-        "is_live": snippet.get("liveBroadcastContent") in ["live", "upcoming"],
+        "is_live": is_live,
         "viewers": live.get("concurrentViewers"),
         "views": stats.get("viewCount"),
         "start": live.get("actualStartTime") or snippet.get("publishedAt")
@@ -524,10 +525,10 @@ def format_caption(info, kind):
         return f"💬 <b>NUEVA PUBLICACIÓN</b>\n\n{title}\n\n👉 {info['link']}"
 
     if kind == "live":
-        v_line = f"👀 {info['viewers']} espectadores en directo\n" if info['viewers'] else ""
-        return f"🔴 <b>DIRECTO EN VIVO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n👉 {info['link']}"
+        v_line = f"👀 {info['viewers']} viewers\n" if info['viewers'] else ""
+        return f"🔴 <b>DIRECTO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n👉 {info['link']}"
     
-    v_line = f"👀 {info['views']} visualizaciones\n" if info['views'] else ""
+    v_line = f"👀 {info['views']} views\n" if info['views'] else ""
     return f"🎥 <b>NUEVO VÍDEO</b>\n✨ <b>{title}</b>\n{v_line}🕒 {iso_to_local(info['start'])}\n👉 {info['link']}"
 
 async def send_post(bot, target, info, kind):
@@ -550,26 +551,42 @@ async def send_post(bot, target, info, kind):
 async def update_msg(bot, target, mid, info, kind):
     cap = format_caption(info, kind)
     try:
-        r = requests.get(info['thumb'], timeout=20)
-        media = InputMediaPhoto(media=io.BytesIO(r.content), caption=cap, parse_mode="HTML")
-        await bot.edit_message_media(chat_id=target["chat_id"], message_id=mid, media=media)
-        return True
+        if info.get('thumb'):
+            r = requests.get(info['thumb'], timeout=20)
+            media = InputMediaPhoto(media=io.BytesIO(r.content), caption=cap, parse_mode="HTML")
+            await bot.edit_message_media(chat_id=target["chat_id"], message_id=mid, media=media)
+            return True
+        else:
+            await bot.edit_message_text(chat_id=target["chat_id"], message_id=mid, text=cap, parse_mode="HTML")
+            return True
     except Exception:
         try: 
             await bot.edit_message_caption(chat_id=target["chat_id"], message_id=mid, caption=cap, parse_mode="HTML")
             return True
         except Exception:
-            return False
+            try:
+                await bot.edit_message_text(chat_id=target["chat_id"], message_id=mid, text=cap, parse_mode="HTML")
+                return True
+            except Exception:
+                return False
 
 async def process_channel_videos(bot, target, channel_id, state):
     if not target or not channel_id:
         return
 
     vids = get_recent_video_ids(channel_id)
+
+    # 💡 MEJORA CLAVE:
+    # Añadimos a la lista de revisión todos los vídeos que figuren con estado "live"
+    # en state["vid_status"]. Así, aunque finalice el directo y desaparezca temporalmente del feed RSS/Playlist,
+    # el bot seguirá consultando la API de YouTube hasta detectar que pasó a "video" y actualizar el mensaje.
+    for vid, status in list(state.get("vid_status", {}).items()):
+        if status == "live" and vid not in vids:
+            vids.append(vid)
+
     newest_vid = vids[0] if vids else None
 
     if vids:
-        vids.reverse()
         for vid in vids:
             info = yt_video_info(vid)
             if not info: continue
@@ -613,23 +630,16 @@ async def process_channel_posts(bot, target, channel_id, state):
         return
 
     posts = get_recent_community_posts(channel_id)
-    if not posts:
-        return
+    if posts:
+        latest_post = posts[0]
+        post_id = latest_post["vid"]
 
-    if "posts_initialized" not in state:
-        for p in posts:
-            state["msg_ids_posts"][p["vid"]] = -1
-        state["posts_initialized"] = True
-        save_state(state)
-        return
-
-    for post in posts:
-        post_id = post["vid"]
-        if post_id not in state["msg_ids_posts"]:
-            if BASELINE_ONLY:
+        if BASELINE_ONLY:
+            if post_id not in state["msg_ids_posts"]:
                 state["msg_ids_posts"][post_id] = -1
-            else:
-                mid = await send_post(bot, target, post, "post")
+        else:
+            if post_id not in state["msg_ids_posts"]:
+                mid = await send_post(bot, target, latest_post, "post")
                 state["msg_ids_posts"][post_id] = mid
                 await send_log(bot, f"💬 Nueva publicación de comunidad enviada.")
 
@@ -652,13 +662,13 @@ async def main_loop():
 
         while True:
             try:
-                # 1. Moderación en vivo de Telegram
+                # 1. Moderación en vivo de Telegram (Siempre activa)
                 if target_ch1_vids:
                     await process_moderation(bot, target_ch1_vids, state, welcome_thread_id=welcome_thread_id)
 
                 now = time.time()
 
-                # 2. Comprobación de YouTube cada 120 segundos
+                # 2. Comprobación de YouTube exactamente cada 120 segundos
                 if now - last_yt_check >= 120:
                     last_yt_check = now
 
@@ -670,7 +680,7 @@ async def main_loop():
                         if CHANNEL_ID_DIRECTO and target_ch2_vids:
                             await process_channel_videos(bot, target_ch2_vids, CHANNEL_ID_DIRECTO, state)
                     except Exception as yt_err:
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ API de YouTube agotada o error (Esperando 2 min...)", flush=True)
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Error comprobando API de YouTube: {yt_err}. Esperando 2 min...", flush=True)
 
                 save_state(state)
 
