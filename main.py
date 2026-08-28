@@ -232,7 +232,7 @@ async def send_warning_message(bot, group_target, user, reasons, thread_id=None)
         "1️⃣ Entra en los Ajustes de Telegram.\n"
         "2️⃣ Ponte un <b>@alias / nombre de usuario</b>.\n"
         "3️⃣ Pon un <b>nombre de perfil con al menos 3 letras reales</b>.\n"
-        "4️⃣ Cuando añadas el nick, saluda en el grupo. Para que el bot reconozca la actualización de tu perfil.\n\n"
+        "4️⃣ Cuando actualices los datos de tu perfil que te faltaban, saluda en el grupo para que el bot reconozca la actualización.\n\n"
         "⏳ <b>Tienes 1 HORA para cambiarlo.</b> Si en 60 minutos no está corregido, el sistema te expulsará automáticamente (podrás volver a entrar en cuanto lo arregles)."
     )
     return await send_telegram_msg(bot, group_target["chat_id"], text, thread_id=thread_id)
@@ -651,10 +651,7 @@ async def process_channel_videos(bot, target, channel_id, state, log_target, sta
 
                     if PIN_LATEST and vid == newest_vid:
                         try:
-                            if target.get("thread_id"):
-                                await bot.unpin_all_chat_messages(chat_id=target["chat_id"], message_thread_id=target["thread_id"])
-                            else:
-                                await bot.unpin_all_chat_messages(chat_id=target["chat_id"])
+                            await bot.unpin_all_chat_messages(chat_id=target["chat_id"])
                             await bot.pin_chat_message(chat_id=target["chat_id"], message_id=mid, disable_notification=True)
                         except Exception as e:
                             print(f"Error al fijar mensaje: {e}", flush=True)
