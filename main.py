@@ -139,7 +139,6 @@ async def save_state_to_telegram(bot, log_target, state, state_msg_id):
     prune_state(state)
     json_str = json.dumps(state, ensure_ascii=False)
 
-    # Solo enviamos peticiones de edicion si los datos han cambiado
     if json_str == LAST_SAVED_JSON:
         return state_msg_id
 
@@ -233,7 +232,7 @@ async def send_warning_message(bot, group_target, user, reasons, thread_id=None)
         "1️⃣ Entra en los Ajustes de Telegram.\n"
         "2️⃣ Ponte un <b>@alias / nombre de usuario</b>.\n"
         "3️⃣ Pon un <b>nombre de perfil con al menos 3 letras reales</b>.\n"
-        "4️⃣ Cuando actualices los datos de tu perfil que te faltaban, saluda en el grupo para que el bot reconozca la actualización.\n\n"
+        "4️⃣ Cuando añadas el nick, saluda en el grupo. Para que el bot reconozca la actualización de tu perfil.\n\n"
         "⏳ <b>Tienes 1 HORA para cambiarlo.</b> Si en 60 minutos no está corregido, el sistema te expulsará automáticamente (podrás volver a entrar en cuanto lo arregles)."
     )
     return await send_telegram_msg(bot, group_target["chat_id"], text, thread_id=thread_id)
