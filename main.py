@@ -94,16 +94,15 @@ async def load_state_from_telegram(bot, log_target):
         "pending_users": {}, "pending_welcomes": {},
         "processed_welcome_users": {}, "last_update_id": 0
     }
-    state_msg_id = None
+    state_msg_id = 1040  # ID fijo asignado al mensaje de estado
     if not log_target:
-        return st, None
+        return st, state_msg_id
 
     chat_id = log_target["chat_id"]
     try:
         chat = await bot.get_chat(chat_id)
         if chat.pinned_message and STATE_MARKER in (chat.pinned_message.text or chat.pinned_message.caption or ""):
             msg_text = chat.pinned_message.text or chat.pinned_message.caption or ""
-            state_msg_id = chat.pinned_message.message_id
             match = re.search(r"<pre>(.*?)</pre>", msg_text, re.DOTALL)
             if match:
                 st = json.loads(match.group(1))
@@ -112,23 +111,6 @@ async def load_state_from_telegram(bot, log_target):
 
     prune_state(st)
     LAST_SAVED_JSON = json.dumps(st, ensure_ascii=False)
-
-    if not state_msg_id:
-        initial_text = f"{STATE_MARKER}\n<pre>{LAST_SAVED_JSON}</pre>"
-        kwargs = {"parse_mode": "HTML"}
-        if log_target.get("thread_id"):
-            kwargs["message_thread_id"] = log_target["thread_id"]
-        
-        try:
-            msg = await bot.send_message(chat_id=chat_id, text=initial_text, **kwargs)
-            state_msg_id = msg.message_id
-            try:
-                await bot.pin_chat_message(chat_id=chat_id, message_id=state_msg_id, disable_notification=True)
-            except Exception as pin_err:
-                print(f"Aviso al fijar estado: {pin_err}", flush=True)
-        except Exception as e:
-            print(f"Error creando base de datos en Telegram: {e}", flush=True)
-
     return st, state_msg_id
 
 async def save_state_to_telegram(bot, log_target, state, state_msg_id):
@@ -212,10 +194,23 @@ async def send_standard_welcome(bot, group_target, user, thread_id=None):
         f"¡Hola {mention}, bienvenido/a a la comunidad! 👋\n\n"
         "La idea de este espacio es ayudarnos entre todos. Si encuentras alguna novedad, herramienta o información interesante que creas que nos puede servir a los demás, ¡compártela!\n\n"
         "También está totalmente permitido compartir enlaces o recursos si con eso ayudamos a resolver la duda de otro miembro.\n\n"
+        "📌 <b>NUESTROS TEMAS Y SECCIONES:</b>\n"
+        '#️⃣ <a href="https://t.me/CacharrearconJuan/1">General</a>\n'
+        '🎮 <a href="https://t.me/CacharrearconJuan/8847">PS5</a>\n'
+        '📺 <a href="https://t.me/CacharrearconJuan/8768">Móviles, Android TV &amp; Fire Stick</a>\n'
+        '🎬 <a href="https://t.me/CacharrearconJuan/5621">Vídeos</a>\n'
+        '📝 <a href="https://t.me/CacharrearconJuan/5801">Publicaciones</a>\n'
+        '🔴 <a href="https://t.me/CacharrearconJuan/5622">Directos</a>\n'
+        '📁 <a href="https://t.me/CacharrearconJuan/6528">Juegos</a>\n'
+        '🔬 <a href="https://t.me/CacharrearconJuan/5626">Proyectos</a>\n'
+        '💻 <a href="https://t.me/CacharrearconJuan/8907">Informática</a>\n'
+        '📚 <a href="https://t.me/CacharrearconJuan/5623">Menú</a>\n'
+        '🚗 <a href="https://t.me/CacharrearconJuan/7757">GTA 6</a>\n'
+        '🛒 <a href="https://t.me/CacharrearconJuan/8478">Chollos y Ofertas</a>\n\n'
         "⚠️ <b>REQUISITO IMPORTANTE:</b>\n"
-        "📌 Recuerda que según las normas del grupo es obligatorio tener un <b>nombre real configurado</b> en tu perfil de Telegram. Si tu cuenta no tiene nombre o solo tiene un punto/símbolo, por favor cámbialo en tus ajustes para evitar que los sistemas de moderación te expulsen.\n\n"
+        "Recuerda que según las normas del grupo es obligatorio tener un <b>nombre real configurado</b> en tu perfil de Telegram. Si tu cuenta no tiene nombre o solo tiene un punto/símbolo, por favor cámbialo en tus ajustes para evitar que los sistemas de moderación te expulsen.\n\n"
         "🛠️ <b>Antes de empezar:</b>\n"
-        "👉 Tienes todas las descargas, tutoriales y enlaces en el <b>MENSAJE FIJADO</b> en la parte superior del chat. ¡Haz clic arriba del todo para verlo!\n"
+        "👉 Tienes todas las descargas, tutoriales y enlaces en el <b>MENSAJE FIJADO</b> en la parte superior del chat.\n"
         "👉 Escribe #normas para leer las reglas rápidas del grupo.\n\n"
         "¡Hagamos de esta una gran comunidad! 🚀"
     )
