@@ -9,9 +9,11 @@ from datetime import datetime, timezone
 from threading import Thread
 from flask import Flask
 from telegram import Bot, InputMediaPhoto
+from telegram.error import RetryAfter, Conflict
 
 STATE_MARKER = "🤖 <b>ESTADO DEL BOT (NO BORRAR)</b>"
 LAST_SAVED_JSON = ""
+LAST_SAVE_TIME = 0  # Control de frecuencia de guardado (Flood Control)
 
 # ==========================================================
 # CONFIGURACIÓN Y VARIABLES DE ENTORNO
@@ -135,9 +137,14 @@ async def load_state_from_telegram(bot, log_target):
     LAST_SAVED_JSON = json.dumps(st, ensure_ascii=False)
     return st, state_msg_id
 
-async def save_state_to_telegram(bot, log_target, state, state_msg_id):
-    global LAST_SAVED_JSON
+async def save_state_to_telegram(bot, log_target, state, state_msg_id, force=False):
+    global LAST_SAVED_JSON, LAST_SAVE_TIME
     if not log_target or not state_msg_id:
+        return state_msg_id
+
+    now = time.time()
+    # Evita guardar más de una vez cada 40 segundos para prevenir Flood Control
+    if not force and (now - LAST_SAVE_TIME < 40):
         return state_msg_id
 
     prune_state(state)
@@ -156,9 +163,14 @@ async def save_state_to_telegram(bot, log_target, state, state_msg_id):
             parse_mode="HTML"
         )
         LAST_SAVED_JSON = json_str
+        LAST_SAVE_TIME = now
+    except RetryAfter as e:
+        print(f"⚠️ Flood control al guardar estado. Esperando {e.retry_after}s", flush=True)
+        await asyncio.sleep(e.retry_after)
     except Exception as e:
         if "message is not modified" in str(e).lower():
             LAST_SAVED_JSON = json_str
+            LAST_SAVE_TIME = now
         else:
             print(f"Error guardando estado en Telegram: {e}", flush=True)
     
@@ -167,16 +179,30 @@ async def save_state_to_telegram(bot, log_target, state, state_msg_id):
 async def send_telegram_msg(bot, chat_id, text, thread_id=None, parse_mode="HTML"):
     kwargs = {"parse_mode": parse_mode}
     if thread_id is not None:
+        kwargs["message_thread_id"] = thread_id
+
+    try:
+        msg = await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+        return msg.message_id
+    except RetryAfter as e:
+        print(f"⚠️ Flood control en envíos. Esperando {e.retry_after}s", flush=True)
+        await asyncio.sleep(e.retry_after)
         try:
-            kwargs["message_thread_id"] = thread_id
             msg = await bot.send_message(chat_id=chat_id, text=text, **kwargs)
             return msg.message_id
-        except Exception as e:
-            print(f"Aviso: No se pudo enviar con thread_id={thread_id} ({e}). Enviando al principal.", flush=True)
-
-    kwargs.pop("message_thread_id", None)
-    msg = await bot.send_message(chat_id=chat_id, text=text, **kwargs)
-    return msg.message_id
+        except Exception as ex:
+            print(f"Error tras reintento: {ex}", flush=True)
+            return None
+    except Exception as e:
+        if thread_id is not None:
+            kwargs.pop("message_thread_id", None)
+            try:
+                msg = await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+                return msg.message_id
+            except Exception:
+                pass
+        print(f"Error enviando mensaje Telegram: {e}", flush=True)
+        return None
 
 async def send_log(bot, text):
     log_target = parse_target(LOG_CHAT_ID_RAW, "log_channel")
@@ -350,6 +376,9 @@ async def process_moderation(bot, group_target, state, log_target, state_msg_id,
 
             await save_state_to_telegram(bot, log_target, state, state_msg_id)
 
+    except Conflict:
+        print("⚠️ Conflicto detectado: Hay dos instancias del bot corriendo a la vez. Pausando 10s...", flush=True)
+        await asyncio.sleep(10)
     except Exception as e:
         print(f"Error en actualizaciones de Telegram: {e}", flush=True)
 
@@ -602,16 +631,21 @@ async def send_post(bot, target, info, kind):
     if target.get("thread_id") is not None:
         kwargs["message_thread_id"] = target["thread_id"]
 
-    if info.get('thumb'):
-        try:
+    try:
+        if info.get('thumb'):
             r = requests.get(info['thumb'], timeout=20)
             msg = await bot.send_photo(chat_id=target["chat_id"], photo=r.content, caption=cap, **kwargs)
             return msg.message_id
-        except Exception as e:
-            print(f"Error enviando foto a {target['chat_id']}: {e}", flush=True)
 
-    msg = await bot.send_message(chat_id=target["chat_id"], text=cap, **kwargs)
-    return msg.message_id
+        msg = await bot.send_message(chat_id=target["chat_id"], text=cap, **kwargs)
+        return msg.message_id
+    except RetryAfter as e:
+        print(f"⚠️ Flood Control enviando post. Reintentando en {e.retry_after}s", flush=True)
+        await asyncio.sleep(e.retry_after)
+        return None
+    except Exception as e:
+        print(f"Error enviando post a {target['chat_id']}: {e}", flush=True)
+        return None
 
 async def update_msg(bot, target, mid, info, kind):
     cap = format_caption(info, kind)
@@ -649,7 +683,7 @@ async def process_channel_videos(bot, target, channel_id, state, log_target, sta
     msg_ids = state.setdefault("msg_ids", {})
     vid_status = state.setdefault("vid_status", {})
 
-    # Comprueba si este destino en concreto ya se ha inicializado previamente
+    # Verificación aislada e independiente para cada destino/tema
     is_initial_run = not any(k.startswith(target_prefix) for k in msg_ids)
 
     for key, status in list(vid_status.items()):
@@ -709,7 +743,7 @@ async def process_channel_posts(bot, target, channel_id, state, log_target, stat
     seen_posts = state.setdefault("seen_posts", [])
     msg_ids_posts = state.setdefault("msg_ids_posts", {})
 
-    # Comprueba si este destino específico ya tiene registros cargados
+    # Verificación de inicio limpio aislada por tema
     is_initial_run = not any(k.startswith(target_prefix) for k in msg_ids_posts)
 
     if posts:
@@ -748,6 +782,12 @@ async def main_loop():
         raise RuntimeError("Missing env var: TELEGRAM_TOKEN")
 
     async with Bot(token=TELEGRAM_TOKEN) as bot:
+        # Cierra sesiones webhooks colgadas anteriores antes de arrancar
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            print(f"Aviso limpiando webhook: {e}", flush=True)
+
         log_target = parse_target(LOG_CHAT_ID_RAW, "log_channel")
         state, state_msg_id = await load_state_from_telegram(bot, log_target)
 
