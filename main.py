@@ -5,13 +5,13 @@ import asyncio
 import requests
 import io
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import Thread
 from flask import Flask
 from telegram import Bot, InputMediaPhoto
 
 STATE_MARKER = "🤖 <b>ESTADO DEL BOT (NO BORRAR)</b>"
-LAST_SAVED_JSON = ""  # Control para evitar saturar la API de Telegram
+LAST_SAVED_JSON = ""
 
 # ==========================================================
 # CONFIGURACIÓN Y VARIABLES DE ENTORNO
@@ -80,19 +80,14 @@ def parse_thread_id(raw_val):
         return None
 
 def prune_state(st):
-    for key in ["msg_ids", "vid_status"]:
-        if isinstance(st.get(key), dict) and len(st[key]) > 40:
+    for key in ["msg_ids", "vid_status", "msg_ids_posts"]:
+        if isinstance(st.get(key), dict) and len(st[key]) > 100:
             keys = list(st[key].keys())
-            for k in keys[:-30]:
+            for k in keys[:-80]:
                 del st[key][k]
 
-    if isinstance(st.get("msg_ids_posts"), dict) and len(st["msg_ids_posts"]) > 40:
-        keys = list(st["msg_ids_posts"].keys())
-        for k in keys[:-30]:
-            del st["msg_ids_posts"][k]
-
-    if isinstance(st.get("seen_posts"), list) and len(st["seen_posts"]) > 100:
-        st["seen_posts"] = st["seen_posts"][-100:]
+    if isinstance(st.get("seen_posts"), list) and len(st["seen_posts"]) > 200:
+        st["seen_posts"] = st["seen_posts"][-150:]
 
 async def load_state_from_telegram(bot, log_target):
     global LAST_SAVED_JSON
@@ -107,14 +102,29 @@ async def load_state_from_telegram(bot, log_target):
 
     chat_id = log_target["chat_id"]
     try:
-        chat = await bot.get_chat(chat_id)
-        if chat.pinned_message and STATE_MARKER in (chat.pinned_message.text or chat.pinned_message.caption or ""):
-            msg_text = chat.pinned_message.text or chat.pinned_message.caption or ""
-            match = re.search(r"<pre>(.*?)</pre>", msg_text, re.DOTALL)
-            if match:
-                st = json.loads(match.group(1))
+        # Carga directa e infalible mediante forward del mensaje 1040
+        fwd = await bot.forward_message(chat_id=chat_id, from_chat_id=chat_id, message_id=state_msg_id)
+        msg_text = fwd.text or fwd.caption or ""
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=fwd.message_id)
+        except Exception:
+            pass
+
+        match = re.search(r"<pre>(.*?)</pre>", msg_text, re.DOTALL)
+        if match:
+            st = json.loads(match.group(1))
+            print("✅ Estado cargado con éxito desde el mensaje 1040.", flush=True)
     except Exception as e:
-        print(f"Cargando estado desde Telegram: {e}", flush=True)
+        print(f"⚠️ Aviso al cargar mensaje 1040: {e}. Reintentando con chat info...", flush=True)
+        try:
+            chat = await bot.get_chat(chat_id)
+            if chat.pinned_message and STATE_MARKER in (chat.pinned_message.text or chat.pinned_message.caption or ""):
+                msg_text = chat.pinned_message.text or chat.pinned_message.caption or ""
+                match = re.search(r"<pre>(.*?)</pre>", msg_text, re.DOTALL)
+                if match:
+                    st = json.loads(match.group(1))
+        except Exception as ex_pin:
+            print(f"Error cargando desde mensaje fijado: {ex_pin}", flush=True)
 
     st.setdefault("msg_ids", {})
     st.setdefault("msg_ids_posts", {})
@@ -555,6 +565,18 @@ def yt_video_info(video_id):
         "start": live.get("actualStartTime") or snippet.get("publishedAt")
     }
 
+def is_video_too_old(info, max_hours=48):
+    start_str = info.get("start")
+    if not start_str:
+        return False
+    try:
+        dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+        now_utc = datetime.now(timezone.utc)
+        age_hours = (now_utc - dt).total_seconds() / 3600.0
+        return age_hours > max_hours
+    except Exception:
+        return False
+
 def iso_to_local(iso_str):
     if not iso_str: return ""
     try:
@@ -651,6 +673,13 @@ async def process_channel_videos(bot, target, channel_id, state, log_target, sta
                 continue
 
             if not mid:
+                # Si el vídeo no está en la BD y tiene más de 48 horas (y NO está en directo), no se publica
+                if is_video_too_old(info, max_hours=48) and not info["is_live"]:
+                    state["msg_ids"][key] = -1
+                    state["vid_status"][key] = kind
+                    state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
+                    continue
+
                 mid = await send_post(bot, target, info, kind)
                 if mid:
                     state["msg_ids"][key] = mid
@@ -676,22 +705,25 @@ async def process_channel_posts(bot, target, channel_id, state, log_target, stat
     posts = get_recent_community_posts(channel_id)
     target_key_label = target.get('key', 'general')
     seen_posts = state.setdefault("seen_posts", [])
+    msg_ids_posts = state.setdefault("msg_ids_posts", {})
+
+    # Si es la primera ejecución o no hay registros, registramos lo existente sin notificar
+    is_initial_run = (len(seen_posts) == 0 and len(msg_ids_posts) == 0)
 
     if posts:
-        # Recorremos de los más antiguos a los más recientes de la lista para publicar en orden
         for post in reversed(posts):
             post_id = post["vid"]
             key = f"{target['chat_id']}_{target.get('thread_id')}_{post_id}"
 
             is_already_seen = (
                 post_id in seen_posts or
-                key in state["msg_ids_posts"] or
-                any(post_id in k for k in state["msg_ids_posts"])
+                key in msg_ids_posts or
+                any(post_id in k for k in msg_ids_posts)
             )
 
-            if BASELINE_ONLY:
+            if BASELINE_ONLY or is_initial_run:
                 if not is_already_seen:
-                    state["msg_ids_posts"][key] = -1
+                    msg_ids_posts[key] = -1
                     if post_id not in seen_posts:
                         seen_posts.append(post_id)
                     state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
@@ -699,7 +731,7 @@ async def process_channel_posts(bot, target, channel_id, state, log_target, stat
                 if not is_already_seen:
                     mid = await send_post(bot, target, post, "post")
                     if mid:
-                        state["msg_ids_posts"][key] = mid
+                        msg_ids_posts[key] = mid
                         if post_id not in seen_posts:
                             seen_posts.append(post_id)
                         state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
