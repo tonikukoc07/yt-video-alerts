@@ -649,7 +649,8 @@ async def process_channel_videos(bot, target, channel_id, state, log_target, sta
     msg_ids = state.setdefault("msg_ids", {})
     vid_status = state.setdefault("vid_status", {})
 
-    is_initial_run = (len(msg_ids) == 0)
+    # Comprueba si este destino en concreto ya se ha inicializado previamente
+    is_initial_run = not any(k.startswith(target_prefix) for k in msg_ids)
 
     for key, status in list(vid_status.items()):
         if status == "live" and key.startswith(target_prefix):
@@ -704,20 +705,21 @@ async def process_channel_posts(bot, target, channel_id, state, log_target, stat
 
     posts = get_recent_community_posts(channel_id)
     target_key_label = target.get('key', 'general')
+    target_prefix = f"{target['chat_id']}_{target.get('thread_id')}_"
     seen_posts = state.setdefault("seen_posts", [])
     msg_ids_posts = state.setdefault("msg_ids_posts", {})
 
-    is_initial_run = (len(seen_posts) == 0 and len(msg_ids_posts) == 0)
+    # Comprueba si este destino específico ya tiene registros cargados
+    is_initial_run = not any(k.startswith(target_prefix) for k in msg_ids_posts)
 
     if posts:
         for post in reversed(posts):
             post_id = post["vid"]
-            key = f"{target['chat_id']}_{target.get('thread_id')}_{post_id}"
+            key = f"{target_prefix}{post_id}"
 
             is_already_seen = (
                 post_id in seen_posts or
-                key in msg_ids_posts or
-                any(post_id in k for k in msg_ids_posts)
+                key in msg_ids_posts
             )
 
             if BASELINE_ONLY or is_initial_run:
