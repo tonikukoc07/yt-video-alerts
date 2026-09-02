@@ -30,7 +30,6 @@ LOG_CHAT_ID_RAW = os.environ.get("LOG_CHAT_ID") or "-1003781665410"
 
 YT_API_KEY = os.environ.get("YT_API_KEY", "")
 TZ = os.environ.get("TZ", "Europe/Madrid")
-PIN_LATEST = os.environ.get("PIN_LATEST", "1") == "1"
 BASELINE_ONLY = os.environ.get("BASELINE_ONLY", "0") == "1"
 
 PROCESSED_USERS_CACHE = {}
@@ -81,20 +80,28 @@ def parse_thread_id(raw_val):
         return None
 
 def prune_state(st):
-    for key in ["msg_ids", "msg_ids_posts", "vid_status"]:
-        if isinstance(st.get(key), dict) and len(st[key]) > 25:
+    for key in ["msg_ids", "vid_status"]:
+        if isinstance(st.get(key), dict) and len(st[key]) > 40:
             keys = list(st[key].keys())
-            for k in keys[:-20]:
+            for k in keys[:-30]:
                 del st[key][k]
+
+    if isinstance(st.get("msg_ids_posts"), dict) and len(st["msg_ids_posts"]) > 40:
+        keys = list(st["msg_ids_posts"].keys())
+        for k in keys[:-30]:
+            del st["msg_ids_posts"][k]
+
+    if isinstance(st.get("seen_posts"), list) and len(st["seen_posts"]) > 100:
+        st["seen_posts"] = st["seen_posts"][-100:]
 
 async def load_state_from_telegram(bot, log_target):
     global LAST_SAVED_JSON
     st = {
         "msg_ids": {}, "msg_ids_posts": {}, "vid_status": {},
         "pending_users": {}, "pending_welcomes": {},
-        "processed_welcome_users": {}, "last_update_id": 0
+        "processed_welcome_users": {}, "seen_posts": [], "last_update_id": 0
     }
-    state_msg_id = 1040  # ID fijo asignado al mensaje de estado
+    state_msg_id = 1040  # Mensaje fijo en https://t.me/c/3781665410/1040
     if not log_target:
         return st, state_msg_id
 
@@ -107,7 +114,16 @@ async def load_state_from_telegram(bot, log_target):
             if match:
                 st = json.loads(match.group(1))
     except Exception as e:
-        print(f"Buscando mensaje de estado anterior: {e}", flush=True)
+        print(f"Cargando estado desde Telegram: {e}", flush=True)
+
+    st.setdefault("msg_ids", {})
+    st.setdefault("msg_ids_posts", {})
+    st.setdefault("vid_status", {})
+    st.setdefault("pending_users", {})
+    st.setdefault("pending_welcomes", {})
+    st.setdefault("processed_welcome_users", {})
+    st.setdefault("seen_posts", [])
+    st.setdefault("last_update_id", 0)
 
     prune_state(st)
     LAST_SAVED_JSON = json.dumps(st, ensure_ascii=False)
@@ -618,8 +634,6 @@ async def process_channel_videos(bot, target, channel_id, state, log_target, sta
             if vid_from_key not in vids:
                 vids.append(vid_from_key)
 
-    newest_vid = vids[0] if vids else None
-
     if vids:
         for vid in vids:
             info = yt_video_info(vid)
@@ -644,13 +658,6 @@ async def process_channel_videos(bot, target, channel_id, state, log_target, sta
                     state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
                     await send_log(bot, f"📢 [{target_key_label}] Alerta publicada: <b>{info['title']}</b> ({kind.upper()}).")
 
-                    if PIN_LATEST and vid == newest_vid:
-                        try:
-                            await bot.unpin_all_chat_messages(chat_id=target["chat_id"])
-                            await bot.pin_chat_message(chat_id=target["chat_id"], message_id=mid, disable_notification=True)
-                        except Exception as e:
-                            print(f"Error al fijar mensaje: {e}", flush=True)
-
             elif mid != -1:
                 old_kind = state["vid_status"].get(key)
                 if old_kind != kind:
@@ -668,23 +675,35 @@ async def process_channel_posts(bot, target, channel_id, state, log_target, stat
 
     posts = get_recent_community_posts(channel_id)
     target_key_label = target.get('key', 'general')
+    seen_posts = state.setdefault("seen_posts", [])
 
     if posts:
-        latest_post = posts[0]
-        post_id = latest_post["vid"]
-        key = f"{target['chat_id']}_{target.get('thread_id')}_{post_id}"
+        # Recorremos de los más antiguos a los más recientes de la lista para publicar en orden
+        for post in reversed(posts):
+            post_id = post["vid"]
+            key = f"{target['chat_id']}_{target.get('thread_id')}_{post_id}"
 
-        if BASELINE_ONLY:
-            if key not in state["msg_ids_posts"]:
-                state["msg_ids_posts"][key] = -1
-                state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
-        else:
-            if key not in state["msg_ids_posts"]:
-                mid = await send_post(bot, target, latest_post, "post")
-                if mid:
-                    state["msg_ids_posts"][key] = mid
+            is_already_seen = (
+                post_id in seen_posts or
+                key in state["msg_ids_posts"] or
+                any(post_id in k for k in state["msg_ids_posts"])
+            )
+
+            if BASELINE_ONLY:
+                if not is_already_seen:
+                    state["msg_ids_posts"][key] = -1
+                    if post_id not in seen_posts:
+                        seen_posts.append(post_id)
                     state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
-                    await send_log(bot, f"💬 [{target_key_label}] Nueva publicación de comunidad enviada.")
+            else:
+                if not is_already_seen:
+                    mid = await send_post(bot, target, post, "post")
+                    if mid:
+                        state["msg_ids_posts"][key] = mid
+                        if post_id not in seen_posts:
+                            seen_posts.append(post_id)
+                        state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
+                        await send_log(bot, f"💬 [{target_key_label}] Nueva publicación de comunidad enviada.")
 
     return state_msg_id
 
