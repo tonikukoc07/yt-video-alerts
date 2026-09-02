@@ -96,14 +96,19 @@ async def load_state_from_telegram(bot, log_target):
         "pending_users": {}, "pending_welcomes": {},
         "processed_welcome_users": {}, "seen_posts": [], "last_update_id": 0
     }
-    state_msg_id = 1040  # Mensaje fijo en https://t.me/c/3781665410/1040
+    state_msg_id = 1040
     if not log_target:
         return st, state_msg_id
 
     chat_id = log_target["chat_id"]
+    thread_id = log_target.get("thread_id")
+
     try:
-        # Carga directa e infalible mediante forward del mensaje 1040
-        fwd = await bot.forward_message(chat_id=chat_id, from_chat_id=chat_id, message_id=state_msg_id)
+        kwargs = {}
+        if thread_id is not None:
+            kwargs["message_thread_id"] = thread_id
+
+        fwd = await bot.forward_message(chat_id=chat_id, from_chat_id=chat_id, message_id=state_msg_id, **kwargs)
         msg_text = fwd.text or fwd.caption or ""
         try:
             await bot.delete_message(chat_id=chat_id, message_id=fwd.message_id)
@@ -115,16 +120,7 @@ async def load_state_from_telegram(bot, log_target):
             st = json.loads(match.group(1))
             print("✅ Estado cargado con éxito desde el mensaje 1040.", flush=True)
     except Exception as e:
-        print(f"⚠️ Aviso al cargar mensaje 1040: {e}. Reintentando con chat info...", flush=True)
-        try:
-            chat = await bot.get_chat(chat_id)
-            if chat.pinned_message and STATE_MARKER in (chat.pinned_message.text or chat.pinned_message.caption or ""):
-                msg_text = chat.pinned_message.text or chat.pinned_message.caption or ""
-                match = re.search(r"<pre>(.*?)</pre>", msg_text, re.DOTALL)
-                if match:
-                    st = json.loads(match.group(1))
-        except Exception as ex_pin:
-            print(f"Error cargando desde mensaje fijado: {ex_pin}", flush=True)
+        print(f"⚠️ Error leyendo mensaje 1040 via forward: {e}", flush=True)
 
     st.setdefault("msg_ids", {})
     st.setdefault("msg_ids_posts", {})
@@ -565,7 +561,7 @@ def yt_video_info(video_id):
         "start": live.get("actualStartTime") or snippet.get("publishedAt")
     }
 
-def is_video_too_old(info, max_hours=48):
+def is_video_too_old(info, max_hours=24):
     start_str = info.get("start")
     if not start_str:
         return False
@@ -673,8 +669,7 @@ async def process_channel_videos(bot, target, channel_id, state, log_target, sta
                 continue
 
             if not mid:
-                # Si el vídeo no está en la BD y tiene más de 48 horas (y NO está en directo), no se publica
-                if is_video_too_old(info, max_hours=48) and not info["is_live"]:
+                if is_video_too_old(info, max_hours=24) and not info["is_live"]:
                     state["msg_ids"][key] = -1
                     state["vid_status"][key] = kind
                     state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
@@ -707,7 +702,6 @@ async def process_channel_posts(bot, target, channel_id, state, log_target, stat
     seen_posts = state.setdefault("seen_posts", [])
     msg_ids_posts = state.setdefault("msg_ids_posts", {})
 
-    # Si es la primera ejecución o no hay registros, registramos lo existente sin notificar
     is_initial_run = (len(seen_posts) == 0 and len(msg_ids_posts) == 0)
 
     if posts:
