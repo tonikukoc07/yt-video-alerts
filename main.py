@@ -249,7 +249,7 @@ async def send_warning_message(bot, group_target, user, reasons, thread_id=None)
         "1️⃣ Entra en los Ajustes de Telegram.\n"
         "2️⃣ Ponte un <b>@alias / nombre de usuario</b>.\n"
         "3️⃣ Pon un <b>nombre de perfil con al menos 3 letras reales</b>.\n"
-        "4️⃣ Cuando actualices los datos de tu perfil que te faltaban, saluda en el grupo para que el bot reconozca la actualización.\n\n"
+        "4️⃣ Cuando actualices los datos de tu perfil que te faltaban, <b>saluda en el grupo</b> para que el bot reconozca la actualización.\n\n"
         "⏳ <b>Tienes 1 HORA para cambiarlo.</b> Si en 60 minutos no está corregido, el sistema te expulsará automáticamente (podrás volver a entrar en cuanto lo arregles)."
     )
     return await send_telegram_msg(bot, group_target["chat_id"], text, thread_id=thread_id)
@@ -646,7 +646,12 @@ async def process_channel_videos(bot, target, channel_id, state, log_target, sta
     target_key_label = target.get('key', 'general')
     target_prefix = f"{target['chat_id']}_{target.get('thread_id')}_"
 
-    for key, status in list(state.get("vid_status", {}).items()):
+    msg_ids = state.setdefault("msg_ids", {})
+    vid_status = state.setdefault("vid_status", {})
+
+    is_initial_run = (len(msg_ids) == 0)
+
+    for key, status in list(vid_status.items()):
         if status == "live" and key.startswith(target_prefix):
             vid_from_key = key[len(target_prefix):]
             if vid_from_key not in vids:
@@ -659,35 +664,35 @@ async def process_channel_videos(bot, target, channel_id, state, log_target, sta
 
             kind = "live" if info["is_live"] else "video"
             key = f"{target_prefix}{vid}"
-            mid = state["msg_ids"].get(key)
+            mid = msg_ids.get(key)
 
-            if BASELINE_ONLY:
+            if BASELINE_ONLY or is_initial_run:
                 if not mid:
-                    state["msg_ids"][key] = -1
-                    state["vid_status"][key] = kind
+                    msg_ids[key] = -1
+                    vid_status[key] = kind
                     state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
                 continue
 
             if not mid:
                 if is_video_too_old(info, max_hours=24) and not info["is_live"]:
-                    state["msg_ids"][key] = -1
-                    state["vid_status"][key] = kind
+                    msg_ids[key] = -1
+                    vid_status[key] = kind
                     state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
                     continue
 
                 mid = await send_post(bot, target, info, kind)
                 if mid:
-                    state["msg_ids"][key] = mid
-                    state["vid_status"][key] = kind
+                    msg_ids[key] = mid
+                    vid_status[key] = kind
                     state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
                     await send_log(bot, f"📢 [{target_key_label}] Alerta publicada: <b>{info['title']}</b> ({kind.upper()}).")
 
             elif mid != -1:
-                old_kind = state["vid_status"].get(key)
+                old_kind = vid_status.get(key)
                 if old_kind != kind:
                     if await update_msg(bot, target, mid, info, kind):
-                        state["msg_ids"][key] = mid
-                        state["vid_status"][key] = kind
+                        msg_ids[key] = mid
+                        vid_status[key] = kind
                         state_msg_id = await save_state_to_telegram(bot, log_target, state, state_msg_id)
                         await send_log(bot, f"🔄 [{target_key_label}] Estado actualizado: <b>{info['title']}</b> pasó de {old_kind} a {kind}.")
 
